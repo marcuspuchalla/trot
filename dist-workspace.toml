@@ -6,6 +6,9 @@ members = ["cargo:."]
 [dist]
 cargo-dist-version = "0.32.0"
 ci = "github"
+# Trial only: build the full matrix on PRs (default is plan-only) so the
+# Windows-on-ARM cross build is actually exercised before it ships.
+pr-run-mode = "upload"
 installers = ["shell", "powershell"]
 # Ship the third-party (treadspan MIT) notice alongside the binary in every archive.
 include = ["THIRD-PARTY-NOTICES.md"]
