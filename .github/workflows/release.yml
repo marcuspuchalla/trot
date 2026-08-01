@@ -138,10 +138,6 @@ jobs:
       - name: "Sign macOS binaries with the hardened runtime"
         if: "runner.os == 'macOS'"
         run: "echo \"CODESIGN_OPTIONS=runtime\" >> \"$GITHUB_ENV\""
-      - uses: swatinem/rust-cache@v2
-        with:
-          key: ${{ join(matrix.targets, '-') }}
-          cache-provider: ${{ matrix.cache_provider }}
       - name: Install dist
         run: ${{ matrix.install_dist.run }}
       # Get the dist-manifest
