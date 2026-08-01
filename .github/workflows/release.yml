@@ -135,6 +135,9 @@ jobs:
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
             echo "$HOME/.cargo/bin" >> $GITHUB_PATH
           fi
+      - name: "Sign macOS binaries with the hardened runtime"
+        if: "runner.os == 'macOS'"
+        run: "echo \"CODESIGN_OPTIONS=runtime\" >> \"$GITHUB_ENV\""
       - uses: swatinem/rust-cache@v2
         with:
           key: ${{ join(matrix.targets, '-') }}

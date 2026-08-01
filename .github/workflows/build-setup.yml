@@ -1,0 +1,11 @@
+# Injected by dist into the build job (see `github-build-setup` in
+# dist-workspace.toml).
+#
+# dist passes $CODESIGN_OPTIONS through to `codesign --options`. Without it the
+# binaries are signed with flags=0x0 — no hardened runtime — and Apple REJECTS
+# notarization of anything not hardened. Verified against a real signed
+# artifact: the build is green and the signature valid either way, so nothing
+# else catches this until notarytool refuses the submission.
+- name: Sign macOS binaries with the hardened runtime
+  if: runner.os == 'macOS'
+  run: echo "CODESIGN_OPTIONS=runtime" >> "$GITHUB_ENV"
