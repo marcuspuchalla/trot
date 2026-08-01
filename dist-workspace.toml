@@ -6,6 +6,14 @@ members = ["cargo:."]
 [dist]
 cargo-dist-version = "0.32.0"
 ci = "github"
+# TEMPORARY (this branch only): build the real matrix on the PR so signing is
+# exercised before a tag depends on it. Removed before merge.
+pr-run-mode = "upload"
+# Codesign the macOS binaries with the Developer ID cert held in the
+# CODESIGN_* secrets. dist signs but does NOT notarize (there is no notarytool
+# anywhere in 0.32.0) — .github/workflows/notarize-macos.yml does that after the
+# release publishes, which is the half that actually lifts Gatekeeper.
+macos-sign = true
 installers = ["shell", "powershell"]
 # Gate the release on the test suite. `plan` is the first stage and every build
 # job depends on it, so if ./test fails NOTHING is built, uploaded or published.
