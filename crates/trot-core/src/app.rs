@@ -13,6 +13,13 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{broadcast, Notify};
 
+/// How long after the last sign of movement another device still counts as
+/// mid-walk. Live frames arrive every few seconds and a rollup bucket lands
+/// every minute, so four minutes is several missed updates — long enough to
+/// ride out a reconnect, short enough that a treadmill stopped is a spinner
+/// stopped.
+const REMOTE_ACTIVE_FRESH_S: f64 = 240.0;
+
 pub struct AppState {
     pub db: Arc<Db>,
     pub hub: broadcast::Sender<Value>,
@@ -317,12 +324,18 @@ impl AppState {
         }
     }
 
-    /// Whether another device is mid-walk, per the synced session rows.
-    /// A twelve-hour freshness bound: long enough for any real walk, short
-    /// enough that a device which vanished mid-session stops claiming one.
+    /// Whether another device is walking RIGHT NOW, per the synced session rows.
+    ///
+    /// The bound is minutes, not hours, and `db::remote_active` measures it from
+    /// the newest sample or rollup we hold for the session rather than from when
+    /// it started. This drives the spinning menu-bar icon, which answers "is
+    /// walking happening", so being wrong here means the icon spins at somebody
+    /// who stopped an hour ago. A walking device publishes far more often than
+    /// this, so silence for four minutes means we genuinely do not know — and
+    /// saying nothing is better than insisting on a walk that ended.
     pub fn remote_active(&self) -> bool {
         self.db
-            .remote_active(&crate::config::device_name(), 12.0 * 3600.0)
+            .remote_active(&crate::config::device_name(), REMOTE_ACTIVE_FRESH_S)
             .unwrap_or(false)
     }
 

@@ -851,13 +851,30 @@ impl Db {
     /// otherwise look like it is still walking for ever.
     pub fn remote_active(&self, mine: &str, fresh_secs: f64) -> Result<bool> {
         let c = self.conn();
+        // Freshness has to be measured from the most recent EVIDENCE of the
+        // walk, not from when it started. Testing `started_ts` answers "did a
+        // walk on another device begin recently", which is a different question
+        // and stays true long after the walking stopped: a session only gets an
+        // `ended_ts` once the other device's close reaches us, and if that sync
+        // is delayed — a backgrounded app, a dropped link — the row sits open
+        // and this reported a walk in progress for the rest of the window.
+        //
+        // Any sample or rollup bucket we hold for the session is proof somebody
+        // was moving at that moment. A rollup bucket is stamped at its start, so
+        // it counts until the end of its minute.
         let n: i64 = c.query_row(
-            "SELECT COUNT(*) FROM sessions
-             WHERE ended_ts IS NULL
-               AND source IS NOT NULL AND source <> ''
-               AND source <> ?
-               AND started_ts > ?",
-            params![mine, now_ts() - fresh_secs],
+            "SELECT COUNT(*) FROM sessions se
+             WHERE se.ended_ts IS NULL
+               AND se.source IS NOT NULL AND se.source <> ''
+               AND se.source <> ?
+               AND MAX(
+                     COALESCE((SELECT MAX(s.ts) FROM samples s
+                               WHERE s.session_id = se.id), 0),
+                     COALESCE((SELECT MAX(r.bucket_ts) + ? FROM sample_rollups_1m r
+                               WHERE r.session_id = se.id), 0),
+                     se.started_ts
+                   ) > ?",
+            params![mine, ROLLUP_RESOLUTION_S, now_ts() - fresh_secs],
             |r| r.get(0),
         )?;
         Ok(n > 0)
@@ -2487,6 +2504,77 @@ mod tests {
     /// samples can never be re-rolled. The walker's correct bucket then arrives
     /// and, under insert-only merge, was discarded as a duplicate. The follower
     /// kept the short figure for ever: not lag, permanent loss.
+    #[test]
+    fn a_remote_walk_stops_counting_as_live_once_it_goes_quiet() {
+        // This drives the spinning menu-bar icon, so it answers "is walking
+        // happening", not "did a walk begin today". A session only gets an
+        // ended_ts when the other device's close reaches us; if that sync is
+        // delayed the row sits open, and measuring freshness from started_ts
+        // left the icon spinning at somebody who had long since stopped.
+        let db = mem();
+        set_test_device("Mac");
+        let start = now_ts() - 1800.0; // began half an hour ago
+
+        let sid = db
+            .open_session(start, "km/h", Some(0), Some(0), Some("iPhone"))
+            .unwrap();
+
+        // Last sign of life: twenty minutes ago. The walk began recently enough
+        // that a started_ts test would still call it live.
+        db.insert_sample(
+            Some(sid),
+            now_ts() - 1200.0,
+            Some(500),
+            Some(600),
+            Some(300),
+            Some(0),
+            Some(0),
+            Some(1),
+        )
+        .unwrap();
+        assert!(
+            !db.remote_active("Mac", 240.0).unwrap(),
+            "a walk silent for twenty minutes must not still be reported as live"
+        );
+
+        // A frame arrives now — that is what walking looks like.
+        db.insert_sample(
+            Some(sid),
+            now_ts() - 5.0,
+            Some(560),
+            Some(660),
+            Some(300),
+            Some(0),
+            Some(0),
+            Some(1),
+        )
+        .unwrap();
+        assert!(
+            db.remote_active("Mac", 240.0).unwrap(),
+            "fresh movement on another device must read as live"
+        );
+
+        // Our own sessions are never "remote", however fresh.
+        let mine = db
+            .open_session(now_ts() - 10.0, "km/h", Some(0), Some(0), Some("Mac"))
+            .unwrap();
+        db.insert_sample(
+            Some(mine),
+            now_ts(),
+            Some(10),
+            Some(10),
+            Some(300),
+            Some(0),
+            Some(0),
+            Some(1),
+        )
+        .unwrap();
+        assert!(
+            !db.remote_active("Mac", 240.0).unwrap() || db.remote_active("iPhone", 240.0).unwrap(),
+            "sanity: ownership is by source, not by recency"
+        );
+    }
+
     #[test]
     fn a_follower_that_saw_half_a_walk_does_not_freeze_on_half_the_steps() {
         // The shipped convergence test imports the walker's COMPLETE raw stream,
