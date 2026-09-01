@@ -9,6 +9,24 @@ commit messages.
 
 ## Unreleased
 
+### Added
+- **Urevo URTM030 walking pads now count steps natively.** Previously only the
+  E1L (`URTM041`) was recognised, so a URTM030 fell through to FTMS, which has
+  no step counter. Its firmware speaks the same native protocol but computes
+  the checksum trailer over a different slice, and calories — which the native
+  protocol does not carry — are now taken from the pad's FTMS service where it
+  exposes one. Contributed by [@jeffrey12cali](https://github.com/jeffrey12cali),
+  verified against real hardware.
+
+### Fixed
+- **`trot scan` aborted with a D-Bus error instead of listing devices.**
+  Properties were read after discovery stopped, and BlueZ deletes temporary
+  unpaired device objects at that point — so the first lookup of a
+  just-removed object failed the entire scan, deterministically, whenever an
+  unpaired device was in range. Properties are now read while discovery is
+  still running and a device that vanishes is skipped rather than fatal.
+  Contributed by [@jeffrey12cali](https://github.com/jeffrey12cali).
+
 - `trot scan` no longer aborts with a D-Bus `GetAll ... doesn't exist` error about
   half the way through: it now reads device properties while discovery is still
   active (BlueZ deletes temporary device objects on stop, which used to kill the

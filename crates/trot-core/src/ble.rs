@@ -79,7 +79,15 @@ pub async fn scan(seconds: f64, all_devices: bool) -> Result<serde_json::Value> 
         // skips, it never fails the scan.
         let props = match p.properties().await {
             Ok(Some(props)) => props,
-            _ => continue,
+            // A device that vanished mid-scan is the expected case and not
+            // worth a word. A genuine transport failure is not, and silently
+            // skipping it would make a treadmill missing from the list look
+            // like it simply was not advertising.
+            Ok(None) => continue,
+            Err(e) => {
+                tracing::debug!("skipping a device whose properties could not be read: {e}");
+                continue;
+            }
         };
         let name = props.local_name.clone().unwrap_or_default();
         let is_match = drivers::any_match(&advertisement(&name, &props.services));

@@ -128,6 +128,12 @@ pub const MSG_STATUS: u8 = 0x51;
 /// verified over all 568 unique captured frames).
 pub const CHECKSUM_XOR_MASK: u8 = 0x5A;
 
+/// Tag under which FTMS Treadmill Data frames are recorded for `/api/diag`.
+/// The native protocol has no such family — this is our own label, chosen as
+/// the low byte of the 2ACD characteristic so a capture makes plain which
+/// service a frame arrived on.
+pub const DIAG_TAG_FTMS: u8 = 0xCD;
+
 /// The status-stream request, byte-identical to what the vendor app writes
 /// (three occurrences in treadspan's app capture, handle FFF2). Family 0x51
 /// is the telemetry family — the same first two bytes every status frame
@@ -512,7 +518,7 @@ impl Driver for Urevo {
                     Err(e) => tracing::warn!("urevo decode error: {e}"),
                 }
             } else if n.uuid == FTMS_DATA_UUID {
-                host.record_frame(0xCD, &n.value); // raw capture for /api/diag
+                host.record_frame(DIAG_TAG_FTMS, &n.value); // raw capture for /api/diag
                 cache_ftms_energy(&mut kcal, &n.value);
             }
         }
