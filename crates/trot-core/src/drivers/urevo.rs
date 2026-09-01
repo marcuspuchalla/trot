@@ -48,7 +48,9 @@
 //!   bytes 9..11:  distance again, 0.001 mile units (u16 LE; unparsed)
 //!   bytes 11..13: steps (u16 LE)
 //!   bytes 13..17: (unknown; 0x00 in every captured frame)
-//!   byte  17:     checksum: `sum(bytes 0..17) mod 256, XOR 0x5A`
+//!   byte  17:     checksum: `sum(bytes 0..17) mod 256, XOR 0x5A` — the
+//!   E1L fixture; the URTM030 firmware computes the same trailer over
+//!   bytes 1..17, excluding the STX (see [`ChecksumKind`])
 //!   byte  18:     0x03 (ETX)
 //!
 //! Provenance notes, because two published claims about this protocol are
@@ -69,17 +71,26 @@
 //!
 //! The checksum rule (`sum XOR 0x5A`) is this module's own derivation —
 //! treadspan does not validate inbound frames — verified over all 568 unique
-//! captured frames including the 6-byte standby frame. A corrupt counter that
-//! parses cleanly poisons step totals, so unlike upstream we reject any frame
-//! whose trailer doesn't check out.
+//! captured frames including the 6-byte standby frame. The E1L (URTM041)
+//! sums bytes 0..len-2; the URTM030 firmware was verified (live capture, a
+//! walking session) to sum bytes 1..len-2 instead — the STX is framing, not
+//! data. The two conventions never agree on the same frame, so the parser
+//! takes the device's expected variant explicitly rather than "accept both":
+//! accepting either would smuggle in a corrupted frame whose flipped byte
+//! happens to satisfy the other rule. A corrupt counter that parses cleanly
+//! poisons step totals, so unlike upstream we reject any frame whose trailer
+//! doesn't check out under the device's own rule.
 //!
-//! No energy field is known, so `calories` stays `None` — absent, not zero.
+//! No energy field is known in the native protocol, so `calories` comes from
+//! the pad's FTMS service when it has one (see [`FTMS_DATA_UUID`] and
+//! [`cache_ftms_energy`]); on a pad without it, calories stay `None` —
+//! absent, not zero.
 
 use super::util::{run_init_sequence, GattIo, InitStep};
 use super::{Advertisement, BeltState, Driver, DriverHost, Emit, Sample};
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use btleplug::api::{Characteristic, Peripheral as _};
+use btleplug::api::{CharPropFlags, Characteristic, Peripheral as _};
 use btleplug::platform::Peripheral;
 use futures::StreamExt;
 use std::collections::BTreeSet;
@@ -91,6 +102,11 @@ pub const SERVICE_UUID: Uuid = super::sig_uuid(0xfff0);
 pub const NOTIFY_CHAR_UUID: Uuid = super::sig_uuid(0xfff1);
 pub const WRITE_CHAR_UUID: Uuid = super::sig_uuid(0xfff2);
 
+/// FTMS Treadmill Data characteristic — the *other* service these pads
+/// expose. It carries no steps, but it does report energy, which the native
+/// stream lacks; where it exists we ride its calories on the native samples.
+pub const FTMS_DATA_UUID: Uuid = super::sig_uuid(0x2acd);
+
 // ---- Advertised names -------------------------------------------------------
 //
 // The E1L advertises `URTM041` (verified in treadspan's app capture, 97
@@ -100,7 +116,7 @@ pub const WRITE_CHAR_UUID: Uuid = super::sig_uuid(0xfff2);
 // would steal them. Comparison is case-insensitive.
 
 /// Name prefixes of Urevo pads verified to speak the proprietary protocol.
-pub const ADV_NAME_PREFIXES: &[&str] = &["URTM041"];
+pub const ADV_NAME_PREFIXES: &[&str] = &["URTM030", "URTM041"];
 
 // ---- Wire constants ---------------------------------------------------------
 
@@ -205,9 +221,29 @@ fn u16_le(frame: &[u8], at: usize) -> u32 {
     (frame[at] as u32) | ((frame[at + 1] as u32) << 8)
 }
 
+/// Which slice the checksum trailer covers. The two Urevo firmware
+/// conventions disagree on whether the STX counts as data, and they never
+/// both succeed on the same frame — the parser therefore takes the device's
+/// allocated variant explicitly (never "accept either", which would let a
+/// corrupted frame satisfying the other rule through).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChecksumKind {
+    /// The E1L (URTM041): `sum(bytes 0..len-2) mod 256, XOR 0x5A`.
+    IncludeStx,
+    /// The URTM030 firmware: `sum(bytes 1..len-2) mod 256, XOR 0x5A`.
+    ExcludeStx,
+}
+
 /// Parse a notification into a [`Status`]. Pure function of the bytes; never
-/// panics on malformed input.
+/// panics on malformed input. Counts the STX byte in the checksum (the
+/// E1L/URTM041 convention); use [`parse_status_with`] for a specific variant.
 pub fn parse_status(frame: &[u8]) -> Result<Status, ProtocolError> {
+    parse_status_with(frame, ChecksumKind::IncludeStx)
+}
+
+/// Like [`parse_status`], but verifies the trailer under the device's own
+/// [`ChecksumKind`].
+pub fn parse_status_with(frame: &[u8], kind: ChecksumKind) -> Result<Status, ProtocolError> {
     if frame.len() < MIN_FRAME_LEN {
         return Err(ProtocolError::BadLength(frame.len()));
     }
@@ -220,7 +256,10 @@ pub fn parse_status(frame: &[u8]) -> Result<Status, ProtocolError> {
     if frame[frame.len() - 1] != TERMINATOR {
         return Err(ProtocolError::BadTerminator);
     }
-    let computed = checksum(&frame[..frame.len() - 2]);
+    let computed = match kind {
+        ChecksumKind::IncludeStx => checksum(&frame[..frame.len() - 2]),
+        ChecksumKind::ExcludeStx => checksum(&frame[1..frame.len() - 2]),
+    };
     let found = frame[frame.len() - 2];
     if computed != found {
         return Err(ProtocolError::BadChecksum { computed, found });
@@ -310,6 +349,46 @@ fn gatt_shape_matches(gatt: &BTreeSet<Characteristic>) -> bool {
 
 pub struct Urevo;
 
+/// Merge an FTMS Treadmill Data notification's total energy (kcal) into the
+/// running energy cache for the native stream.
+///
+/// The energy is cumulative per session and present only when the FTMS frame
+/// carries it, so it stays behind the native samples as `Option`: `None`
+/// until the first calibrated reading arrives, and never a fabricated zero.
+fn cache_ftms_energy(kcal: &mut Option<u32>, frame: &[u8]) {
+    match super::ftms::parse_treadmill_data(frame) {
+        Ok(d) => {
+            if let Some(k) = d.total_energy_kcal {
+                *kcal = Some(k);
+            }
+        }
+        Err(e) => tracing::debug!("ignoring unparseable FTMS frame: {e}"),
+    }
+}
+
+/// Is this the 5-byte keepalive the URTM030 firmware streams (~1 Hz) while
+/// the belt is stopped? It's the ack for the status-stream wake, not a
+/// status frame, so the driver skips it instead of warning on every one.
+/// Gated on the URTM030 checksum variant — the E1L's deep-standby frames are
+/// 6 bytes and must keep flowing through the normal path.
+fn is_idle_ack(value: &[u8], kind: ChecksumKind) -> bool {
+    kind == ChecksumKind::ExcludeStx
+        && value.len() == 5
+        && value[0] == FRAME_PREFIX
+        && value[1] == MSG_STATUS
+}
+
+/// Ride the cached FTMS energy on a native sample — but only on frames that
+/// carry counters. A deep-standby frame reports only its state; tagging it
+/// with calories would claim the pad sent an energy reading it didn't (and
+/// would hand the pipeline a calories-only row whose every other field is
+/// absent — a shape no other driver emits).
+fn merge_energy(sample: &mut Sample, status: &Status, kcal: Option<u32>) {
+    if status.counters.is_some() {
+        sample.calories = kcal;
+    }
+}
+
 #[async_trait]
 impl Driver for Urevo {
     fn id(&self) -> &'static str {
@@ -348,12 +427,56 @@ impl Driver for Urevo {
         // Subscribe first, then wake — the pad streams immediately after the
         // request and the first frame must not be missed.
         link.subscribe(&notify_char).await?;
+
+        // These pads also expose a real FTMS service. It has no step counter
+        // but it does report energy, which the native stream lacks — so where
+        // a Treadmill Data (2ACD) notify is present we take calories from it
+        // and ride them on the native samples. Optional on purpose: a pad
+        // without it simply reports no calories (absent, never zero), and a
+        // failed subscribe must not take the native stream down either.
+        if let Some(c) = chars
+            .iter()
+            .find(|c| c.uuid == FTMS_DATA_UUID && c.properties.contains(CharPropFlags::NOTIFY))
+        {
+            if let Err(e) = link.subscribe(c).await {
+                tracing::warn!("could not subscribe to FTMS energy (2ACD): {e}");
+            }
+        }
+
         let mut notifications = link.notifications().await?;
         run_init_sequence(link, &init_steps()).await?;
 
+        // The checksum trailer covers the STX on the E1L (URTM041) but not on
+        // the URTM030 firmware; pick the variant from the device's own name
+        // (see ChecksumKind). A name that can't be read falls back to the E1L
+        // rule — logged, because on a URTM030 that silently rejects every
+        // frame, and a silent full-stream loss is exactly what the name gate
+        // exists to prevent.
+        let checksum_kind = match link.properties().await {
+            Ok(Some(p)) => match p.local_name.as_deref().map(normalized) {
+                Some(n) if n.starts_with("URTM030") => ChecksumKind::ExcludeStx,
+                Some(_) => ChecksumKind::IncludeStx,
+                None => {
+                    tracing::warn!(
+                        "no advertised name from the pad; assuming the E1L checksum — a URTM030 would be rejected"
+                    );
+                    ChecksumKind::IncludeStx
+                }
+            },
+            Ok(None) => {
+                tracing::warn!("pad reported no properties; assuming the E1L checksum");
+                ChecksumKind::IncludeStx
+            }
+            Err(e) => {
+                tracing::warn!("could not read pad properties ({e}); assuming the E1L checksum");
+                ChecksumKind::IncludeStx
+            }
+        };
+
+        let mut kcal: Option<u32> = None;
         loop {
-            let frame = match tokio::time::timeout(IDLE_TIMEOUT, notifications.next()).await {
-                Ok(Some(n)) => n.value,
+            let n = match tokio::time::timeout(IDLE_TIMEOUT, notifications.next()).await {
+                Ok(Some(n)) => n,
                 Ok(None) => return Err(anyhow!("notification stream ended")),
                 Err(_) => {
                     if !link.is_connected().await.unwrap_or(false) {
@@ -367,14 +490,30 @@ impl Driver for Urevo {
                     continue;
                 }
             };
-            host.record_frame(MSG_STATUS, &frame); // raw capture for /api/diag
 
-            match parse_status(&frame) {
-                Ok(status) => emit(to_sample(&status)),
-                Err(ProtocolError::NotStatus(t)) => {
-                    tracing::debug!("ignoring non-status frame family 0x{t:02x}");
+            if n.uuid == NOTIFY_CHAR_UUID {
+                // The URTM030 firmware answers the status-stream wake with a 5-byte
+                // keepalive (`02 51 00 0b 03`) while the belt is stopped, at
+                // ~1 Hz. It's an ack, not a status frame, so skip it instead
+                // of logging a decode warning every second.
+                if is_idle_ack(&n.value, checksum_kind) {
+                    continue;
                 }
-                Err(e) => tracing::warn!("urevo decode error: {e}"),
+                host.record_frame(MSG_STATUS, &n.value); // raw capture for /api/diag
+                match parse_status_with(&n.value, checksum_kind) {
+                    Ok(status) => {
+                        let mut sample = to_sample(&status);
+                        merge_energy(&mut sample, &status, kcal);
+                        emit(sample);
+                    }
+                    Err(ProtocolError::NotStatus(t)) => {
+                        tracing::debug!("ignoring non-status frame family 0x{t:02x}");
+                    }
+                    Err(e) => tracing::warn!("urevo decode error: {e}"),
+                }
+            } else if n.uuid == FTMS_DATA_UUID {
+                host.record_frame(0xCD, &n.value); // raw capture for /api/diag
+                cache_ftms_energy(&mut kcal, &n.value);
             }
         }
     }
@@ -596,6 +735,140 @@ mod tests {
         let n = corrupt.len();
         corrupt[n - 2] = checksum(&corrupt[..n - 2]);
         assert_eq!(parse_status(&corrupt).unwrap().counters.unwrap().steps, 362);
+    }
+
+    /// The URTM030 firmware's trailer is the same sums, over bytes 1..len-2
+    /// (the STX is framing, not data). Verified on a live walking-session
+    /// capture; the two conventions never agree, so each device only accepts
+    /// its own variant.
+    #[test]
+    fn urtm030_checksum_covers_bytes_1_dot_dot_len_minus_2() {
+        // A running capture (status 0x03, 19 bytes) and a deep-standby
+        // frame, both from a live URTM030 session while walking.
+        let running = hx("02 51 03 0a 00 50 01 09 00 61 00 cd 00 00 00 00 00 bc 03");
+        let standby = hx("02 51 02 03 0c 03");
+
+        for frame in [&running, &standby] {
+            assert!(parse_status_with(frame, ChecksumKind::ExcludeStx).is_ok());
+            assert!(
+                parse_status_with(frame, ChecksumKind::IncludeStx).is_err(),
+                "URTM030 frame {frame:02x?} would collide with the E1L variant"
+            );
+        }
+        // The E1L fixture is the mirror image: only the E1L variant accepts it.
+        let e1l = hx(RUNNING_FIXTURE);
+        assert!(parse_status_with(&e1l, ChecksumKind::IncludeStx).is_ok());
+        assert!(parse_status_with(&e1l, ChecksumKind::ExcludeStx).is_err());
+
+        // The URTM030 counter offsets are the same as the E1L's.
+        let s = parse_status_with(&running, ChecksumKind::ExcludeStx).unwrap();
+        let c = s.counters.unwrap();
+        assert_eq!(c.steps, 0x00cd, "step counter decodes at 11..13");
+        assert_eq!(c.speed_raw, 0x0a, "speed decodes at byte 3");
+        assert_eq!(s.status, 0x03, "status decodes at byte 2");
+
+        // Corrupting a counter byte is rejected under the device's own rule.
+        for i in 0..running.len() {
+            let mut m = running.clone();
+            m[i] ^= 0x01;
+            assert!(
+                parse_status_with(&m, ChecksumKind::ExcludeStx).is_err(),
+                "URTM030 accepted a corrupted frame (flip at {i})"
+            );
+        }
+    }
+
+    /// The FTMS energy merge: a Treadmill Data frame that carries energy
+    /// fills the cache, one that does not leaves it untouched, and garbage
+    /// never mints a reading.
+    #[test]
+    fn ftms_energy_merges_only_present_calories() {
+        // Real frames from a URTM030 walking session (FTMS ran in parallel
+        // with the native stream in the first live capture).
+        let with_kcal = hx("84 04 64 00 09 00 00 01 00 ff ff ff 23 00"); // 1 kcal
+                                                                         // Flags 0x0004 (Total Distance): no speed and no energy fields at
+                                                                         // all, so the cache is left alone.
+        let without_energy = hx("04 00 64 00 09 00 00");
+        // Real FTMS frame from the same session: energy present, value zero.
+        // A reported zero is data, not absence — it must ride through.
+        let zero_kcal = hx("84 04 00 00 05 00 00 00 00 ff ff ff 13 00");
+        let garbage = vec![0xDE, 0xAD, 0xBE];
+
+        let mut kcal = None;
+        cache_ftms_energy(&mut kcal, &garbage);
+        assert_eq!(kcal, None, "garbage must not mint a reading");
+        cache_ftms_energy(&mut kcal, &without_energy);
+        assert_eq!(
+            kcal, None,
+            "a frame without energy leaves the cache untouched"
+        );
+        cache_ftms_energy(&mut kcal, &zero_kcal);
+        assert_eq!(kcal, Some(0), "a reported zero is data, not absence");
+        cache_ftms_energy(&mut kcal, &with_kcal);
+        assert_eq!(
+            kcal,
+            Some(1),
+            "the energy field rides onto the native stream"
+        );
+    }
+
+    /// The end-to-end merge invariant at the Sample boundary: a native frame
+    /// and a calorie-bearing FTMS frame together produce a sample that has
+    /// both native steps and the FTMS energy.
+    #[test]
+    fn native_sample_carries_the_merged_ftms_calories() {
+        let native = parse_status_with(
+            &hx("02 51 03 0a 00 50 01 09 00 61 00 cd 00 00 00 00 00 bc 03"),
+            ChecksumKind::ExcludeStx,
+        )
+        .unwrap();
+        let mut sample = to_sample(&native);
+        assert_eq!(sample.steps, Some(0xcd), "native steps decode");
+        assert_eq!(
+            sample.calories, None,
+            "calories are absent before an FTMS frame"
+        );
+
+        let mut kcal = None;
+        cache_ftms_energy(&mut kcal, &hx("84 04 64 00 09 00 00 01 00 ff ff ff 23 00"));
+        sample.calories = kcal;
+        assert_eq!(sample.calories, Some(1));
+        assert_eq!(
+            sample.steps,
+            Some(0xcd),
+            "native counters survive the merge"
+        );
+
+        // A deep-standby frame reports only its state: it must NOT ride the
+        // energy cache, or the pipeline would get a calories-only row.
+        let standby =
+            parse_status_with(&hx("02 51 02 03 0c 03"), ChecksumKind::ExcludeStx).unwrap();
+        let mut idle = to_sample(&standby);
+        let kcal = Some(9); // cranked during a previous walk
+        merge_energy(&mut idle, &standby, kcal);
+        assert_eq!(idle.calories, None, "standby frames never carry calories");
+        assert_eq!(idle.steps, None, "…nor any other counter");
+    }
+
+    /// Only the URTM030 5-byte idle ack is skipped — never the E1L's 6-byte
+    /// standby frames, never a running frame, and never a non-status family.
+    #[test]
+    fn idle_ack_is_the_short_status_family_frame_from_a_urtm030() {
+        let ack = hx("02 51 00 0b 03"); // real URTM030 keepalive
+        assert!(is_idle_ack(&ack, ChecksumKind::ExcludeStx), "the real ack");
+        // The E1L variant is not gated: its frames must keep flowing.
+        assert!(!is_idle_ack(&ack, ChecksumKind::IncludeStx));
+        // Six-byte deep-standby and 19-byte running frames are not acks.
+        assert!(!is_idle_ack(
+            &hx("02 51 02 03 0c 03"),
+            ChecksumKind::ExcludeStx
+        ));
+        assert!(!is_idle_ack(&hx(RUNNING_FIXTURE), ChecksumKind::ExcludeStx));
+        // A short frame of another family is not our ack.
+        assert!(!is_idle_ack(
+            &hx("02 50 00 0b 03"),
+            ChecksumKind::ExcludeStx
+        ));
     }
 
     // ---- Malformed input -----------------------------------------------------

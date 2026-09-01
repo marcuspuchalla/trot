@@ -345,6 +345,7 @@ mod tests {
         // E1L and the hyphen-less/RM-02 Sperax revisions now have native
         // drivers (they used to be deliberately unclaimed).
         assert!(any_match(&adv("URTM041", &[])));
+        assert!(any_match(&adv("URTM030", &[])));
         assert!(any_match(&adv("SPERAX_RM01", &[])));
         assert!(any_match(&adv("SPERAX_RM-02", &[])));
         // The PitPat/Deerrun/SupeRun family: by name or its FBA0 service.

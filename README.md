@@ -177,9 +177,10 @@ full-size treadmills alike. Three ways in:
   removed for licensing prudence.
 - **Urevo\* (E1L)** — the E1L broadcasts FTMS *and* a proprietary protocol, and
   only the proprietary one reports steps, so it gets a **native adapter**
-  (ported from open-source reverse engineering, tested against published frame
-  captures — not yet against real hardware). Other Urevo pads (e.g. the
-  Spacewalk 3S) use the FTMS path below.
+  (ported from open-source reverse engineering and tested against published
+  frame captures; the URTM030 model has since been verified live against real
+  hardware, including its slightly different checksum convention). Other Urevo
+  pads (e.g. the Spacewalk 3S) use the FTMS path below.
 - **Sperax\* (RM01 / RM-02)** — these revisions speak a proprietary protocol
   (unlike the FTMS-broadcasting RM-01), so they get a **native adapter** too,
   ported from open-source reverse engineering — untested on real hardware, and

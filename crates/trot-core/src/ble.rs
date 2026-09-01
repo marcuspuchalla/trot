@@ -68,13 +68,18 @@ pub async fn scan(seconds: f64, all_devices: bool) -> Result<serde_json::Value> 
     adapter.start_scan(ScanFilter::default()).await?;
     tokio::time::sleep(Duration::from_secs_f64(seconds)).await;
     let peripherals = adapter.peripherals().await?;
-    let _ = adapter.stop_scan().await;
 
     let mut rows = Vec::new();
     for p in peripherals {
-        let props = match p.properties().await? {
-            Some(props) => props,
-            None => continue,
+        // Read properties while discovery is still running. BlueZ deletes
+        // temporary (unpaired LE) device objects on StopDiscovery, so a device
+        // read only after stop_scan aborts the whole scan with a D-Bus
+        // MethodNotFound ("GetAll ... doesn't exist"). Reading first keeps a
+        // just-found treadmill visible; a device that vanishes mid-scan just
+        // skips, it never fails the scan.
+        let props = match p.properties().await {
+            Ok(Some(props)) => props,
+            _ => continue,
         };
         let name = props.local_name.clone().unwrap_or_default();
         let is_match = drivers::any_match(&advertisement(&name, &props.services));
@@ -89,6 +94,7 @@ pub async fn scan(seconds: f64, all_devices: bool) -> Result<serde_json::Value> 
             "match": is_match,
         }));
     }
+    let _ = adapter.stop_scan().await;
     rows.sort_by(|a, b| {
         let ra = a["rssi"].as_i64().unwrap_or(-999);
         let rb = b["rssi"].as_i64().unwrap_or(-999);

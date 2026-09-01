@@ -206,6 +206,12 @@ fn matrix() -> Vec<Row> {
             &["urevo", "ftms", "lifespan-fallback"],
         ),
         row(
+            "Urevo URTM030 (E1L-family, real hardware, also exposing FTMS)",
+            "URTM030",
+            with_ftms(lifespan_shape()),
+            &["urevo", "ftms", "lifespan-fallback"],
+        ),
+        row(
             "Urevo Spacewalk 3S (plain FTMS despite the URTM name)",
             "URTM024",
             with_ftms(lifespan_shape()),
@@ -526,9 +532,11 @@ fn name_claimants(name: &str) -> Vec<&'static str> {
 }
 
 /// No advertised name is claimed by two drivers at scan time, with one
-/// documented exception: `URTM041…` matches both Urevo (its verified native
-/// name) and FTMS (whose real-world list carries the broader `URTM` prefix);
-/// the registry order resolves that pair deliberately (native outranks FTMS).
+/// documented exception: the verified native Urevo models (`URTM030…`,
+/// `URTM041…`) match both Urevo (native outranks FTMS in the registry) and
+/// FTMS (whose real-world list carries the broader `URTM` prefix). The
+/// exception is computed from the FTMS name list rather than hardcoded, so a
+/// future native model added to either list is handled automatically.
 #[test]
 fn name_lists_are_disjoint_across_drivers() {
     use trot_core::drivers::{ftms, kingsmith_wilink, lifespan};
@@ -557,7 +565,9 @@ fn name_lists_are_disjoint_across_drivers() {
     for (owner, names) in &claims {
         for name in names {
             let got = name_claimants(name);
-            let expected: Vec<&str> = if name.to_ascii_uppercase().starts_with("URTM041") {
+            let upper = name.to_ascii_uppercase();
+            let ftms_also_claims = ftms::ADV_NAME_PREFIXES.iter().any(|p| upper.starts_with(p));
+            let expected: Vec<&str> = if *owner == "urevo" && ftms_also_claims {
                 vec!["urevo", "ftms"] // the documented deliberate overlap
             } else {
                 vec![owner]

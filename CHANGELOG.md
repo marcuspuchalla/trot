@@ -9,7 +9,25 @@ commit messages.
 
 ## Unreleased
 
-<!-- Nothing yet. Write what changed here; a release cannot be cut from an empty section. -->
+- `trot scan` no longer aborts with a D-Bus `GetAll ... doesn't exist` error about
+  half the way through: it now reads device properties while discovery is still
+  active (BlueZ deletes temporary device objects on stop, which used to kill the
+  scan), and a device that vanishes mid-scan is skipped instead of failing the
+  whole scan.
+- **Urevo URTM030 now reports steps.** The Urevo driver only knew `URTM041`, so
+  a URTM030 (which exposes the same proprietary service `0xFFF0` with notify
+  `FFF1`/write `FFF2` alongside FTMS) fell through to FTMS, which has no step
+  counter. URTM030 speaks the same native status protocol, but its firmware
+  computes the trailer over bytes `1..len-2` (excluding the STX) where the E1L
+  counts it — so the Urevo driver now picks the checksum variant from the
+  advertised name and decodes steps, speed, distance and duration from the
+  native stream. Calories, which the native protocol doesn't carry, are taken
+  from the pad's FTMS service when one is present and ridden on the native
+  samples — so a Urevo pad that also exposes FTMS keeps its energy readings.
+- **No more per-second `urevo decode error: expected at least 6 bytes, got 5`
+  log spam** while a URTM030 pad is idle (belt stopped, just booted). That
+  frame is the firmware's wake ack/keepalive, not a status frame; the driver
+  now recognises and skips it instead of warning on every arrival.
 
 ## 0.4.0
 
