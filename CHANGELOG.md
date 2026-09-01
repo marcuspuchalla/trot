@@ -9,6 +9,10 @@ commit messages.
 
 ## Unreleased
 
+<!-- Nothing yet. Write what changed here; a release cannot be cut from an empty section. -->
+
+## 0.5.0
+
 ### Added
 - **Urevo URTM030 walking pads now count steps natively.** Previously only the
   E1L (`URTM041`) was recognised, so a URTM030 fell through to FTMS, which has
