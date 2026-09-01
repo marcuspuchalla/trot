@@ -1329,7 +1329,22 @@ impl Db {
 
     fn bucket_expr(ts_col: &str, resolution_s: i64) -> String {
         if resolution_s >= 86400 {
-            format!("CAST(strftime('%s', date({ts_col}, 'unixepoch', 'localtime')) AS INTEGER)")
+            // The `'utc'` modifier is load-bearing. Without it this yields the
+            // epoch of UTC midnight on the local date, which is NOT the start of
+            // the local day — in CEST it lands two hours late. The raw tail is
+            // bucketed in Rust by `local_midnight`, which returns the real
+            // thing, so the two disagreed by exactly the UTC offset and a day
+            // that had both rolled-up history and a walk in progress came back
+            // as TWO buckets. Both rendered under the same label, so the chart
+            // showed today twice: yesterday's leftovers in one column and the
+            // walk you were on in the other.
+            //
+            // It is also wrong on its own terms west of UTC, where UTC midnight
+            // on the local date falls on the PREVIOUS local day and the column
+            // would carry the wrong label outright.
+            format!(
+                "CAST(strftime('%s', date({ts_col}, 'unixepoch', 'localtime'), 'utc') AS INTEGER)"
+            )
         } else {
             format!("(CAST({ts_col} AS INTEGER) / {resolution_s}) * {resolution_s}")
         }
@@ -2504,6 +2519,68 @@ mod tests {
     /// samples can never be re-rolled. The walker's correct bucket then arrives
     /// and, under insert-only merge, was discarded as a duplicate. The follower
     /// kept the short figure for ever: not lag, permanent loss.
+    #[test]
+    fn a_day_with_both_rolled_and_live_data_is_one_column_not_two() {
+        // Day buckets were defined twice: the rollup tier keyed them in SQL and
+        // the not-yet-rolled raw tail keyed them in Rust. The SQL version
+        // produced UTC midnight on the local date rather than the local day's
+        // actual start, so away from UTC the two disagreed by the offset and a
+        // day that had both — any day you are still walking on — came back as
+        // two buckets that rendered under the same label.
+        let db = mem();
+        set_test_device("Mac");
+        let now = now_ts();
+        let base = (now / 60.0).floor() * 60.0 - 600.0;
+
+        let sid = db
+            .open_session(base, "km/h", Some(0), Some(0), Some("Mac"))
+            .unwrap();
+        for (i, steps) in [0u32, 100, 200, 300, 400].iter().enumerate() {
+            db.insert_sample(
+                Some(sid),
+                base + (i as f64) * 60.0,
+                Some(*steps),
+                Some(i as u32 * 60),
+                Some(300),
+                Some(0),
+                Some(0),
+                Some(1),
+            )
+            .unwrap();
+        }
+        // Roll up only the first half, leaving a live tail above the floor —
+        // precisely the state of a day you are still walking.
+        db.rollup_samples_at(base + 180.0).unwrap();
+
+        let series = db
+            .timeseries("steps", 86400, now - 2.0 * 86400.0, now + 86400.0)
+            .unwrap();
+        let today = local_date(now);
+        let for_today: Vec<&Value> = series
+            .iter()
+            .filter(|b| {
+                b["bucket_ts"]
+                    .as_i64()
+                    .map(|ts| local_date(ts as f64) == today)
+                    .unwrap_or(false)
+            })
+            .collect();
+        assert_eq!(
+            for_today.len(),
+            1,
+            "today split across {} buckets: {series:?}",
+            for_today.len()
+        );
+
+        // And the single bucket must start at the local day, not at UTC midnight.
+        let ts = for_today[0]["bucket_ts"].as_i64().unwrap();
+        assert_eq!(
+            ts,
+            local_midnight(&today).unwrap() as i64,
+            "day bucket is not the start of the local day"
+        );
+    }
+
     #[test]
     fn a_remote_walk_stops_counting_as_live_once_it_goes_quiet() {
         // This drives the spinning menu-bar icon, so it answers "is walking
