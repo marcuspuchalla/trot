@@ -325,6 +325,20 @@ Trot's own name and the runner mark are reserved and are **not** covered by the
 GPLv3 that covers the code — GPLv3 §7(e) expressly allows this. Fork the code
 freely; just give your fork its own name and mark.
 
+## Contributors
+No manufacturer publishes a specification for any of these treadmills, and we do
+not own most of them. Every adapter beyond LifeSpan exists because somebody else
+did the work first — and a pad that is *verified* rather than merely implemented
+means somebody put a real machine in front of it.
+
+- [**@jeffrey12cali**](https://github.com/jeffrey12cali) — native step counting
+  for the Urevo **URTM030**, verified live against the pad including its
+  different checksum convention, plus a fix for `trot scan` aborting on Linux
+  when an unpaired device disappeared mid-scan. ([#3](https://github.com/marcuspuchalla/trot/pull/3))
+
+Owner of a treadmill Trot cannot read yet? A capture from a real machine is the
+most useful thing you can send — see [Contributing](#contributing).
+
 ## Acknowledgements
 Trot's LifeSpan / Omni protocol support was bootstrapped from and cross-checked
 against [**blak3r/treadspan**](https://github.com/blak3r/treadspan) (MIT,
