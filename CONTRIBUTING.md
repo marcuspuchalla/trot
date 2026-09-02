@@ -9,9 +9,10 @@ that make it do that better are very welcome.
 **An adapter for a treadmill we can't read yet.** Trot currently ships six
 drivers: native adapters for LifeSpan/Omni, KingSmith WalkingPad (the WiLink
 generation), Urevo, Sperax and PitPat/Deerrun/SupeRun, plus generic FTMS for
-everything else. Only LifeSpan is tested by us on real hardware — the rest
-are ports of open-source reverse engineering pinned against published
-captures, so hardware reports (even "it works") are valuable on their own.
+everything else. Two are tested on real hardware: LifeSpan by us, and the Urevo URTM030 by the
+contributor who added it. The rest are ports of open-source reverse engineering
+pinned against published captures, so hardware reports (even "it works") are
+valuable on their own — the Urevo support exists because somebody sent one.
 (Two further families — the app-cipher KingSmith generation and the FitShow
 OEM platform — had drivers that were deliberately removed for licensing
 prudence; see `docs/provenance.md` before proposing to re-add either.)

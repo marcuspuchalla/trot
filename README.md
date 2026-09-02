@@ -202,7 +202,7 @@ full-size treadmills alike. Three ways in:
   CitySports\*, WellFit\*, Mobvoi\*, Sportstech\* (sWalk), YPOO\*, TheRun\*,
   Sperax\* (RM-01) and newer KingSmith models among them. On KingSmith FTMS
   pads Trot also reads the vendor's step-count extension, so steps accrue
-  there too. (Only LifeSpan is tested by us on real hardware.)
+  there too. (Tested on real hardware: LifeSpan by us, the Urevo URTM030 by a contributor.)
 
 FTMS is per-model: if your treadmill has an "FTMS" or "broadcast to Zwift/Kinomap"
 mode, `trot scan` will find it. The **FitShow\*** OEM family (the `FS-…` BLE
@@ -292,8 +292,8 @@ which drives the actual router over HTTP.
 ## Contributing
 
 The most useful contribution is a **treadmill report**: if Trot can't read yours,
-a `trot scan --all` listing tells us more than anything else — only LifeSpan is
-tested here on real hardware. Device support is a modular driver system: adding
+a `trot scan --all` listing tells us more than anything else — only two adapters
+have been confirmed against a physical machine. Device support is a modular driver system: adding
 a treadmill is one self-contained file plus one registration line, and
 [docs/drivers/README.md](docs/drivers/README.md) teaches the whole process.
 See [CONTRIBUTING.md](CONTRIBUTING.md) for how to build and what CI expects,
