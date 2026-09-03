@@ -1,5 +1,21 @@
 <!-- Thanks for contributing. Keep this short — a sentence or two is fine. -->
 
+## Contributor Licence Agreement
+
+<!-- This is the one box that cannot be skipped. Everything else here is a
+     checklist; this is the term the project depends on. -->
+
+- [ ] I have read the [Contributor Licence Agreement](../blob/main/CONTRIBUTING.md#contributor-licence-agreement)
+      and I agree to it.
+
+<!-- In short: you keep your copyright; your contribution ships GPLv3 to every
+     user of Trot and that cannot be revoked; and you grant Marcus Puchalla a
+     licence to also distribute it under other licences. That last point is what
+     lets the same engine run inside Nowhere on iOS and Android, where the
+     platform forbids the separate-process split used on desktop. Without it
+     from every contributor, that stops being possible for anyone. The full
+     reasoning is in CONTRIBUTING.md — please read it rather than just ticking. -->
+
 ## What this changes
 
 <!-- And why. If it fixes an issue: "Fixes #123". -->

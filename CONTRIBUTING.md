@@ -143,6 +143,19 @@ and plenty of people hold it. Open an issue instead. A protocol capture, a
 genuinely the most valuable thing anyone can contribute, and none of it needs a
 CLA.
 
+#### For the maintainer, at merge time
+
+**Do not merge a pull request until its CLA box is ticked.** The pull request
+template carries the box; check it is actually checked, and if it is not, ask
+before merging rather than after. Agreement has to be an act the contributor
+performed, not a term they might never have opened — a clause sitting in this
+file is far weaker than a box someone chose to tick.
+
+This is cheap to get right at merge time and expensive to fix later: obtaining
+confirmation from one person who just contributed is a friendly message, while
+obtaining it from fifteen people a year on is a project-stopping problem, and a
+single unreachable contributor makes it permanent.
+
 ### Third-party code
 
 **Independent implementation is the rule.** Every driver here is written
