@@ -52,7 +52,7 @@ pub trait GattIo: Send + Sync {
 }
 
 #[async_trait]
-impl GattIo for btleplug::platform::Peripheral {
+impl GattIo for crate::diagnostics::Link {
     async fn write_uuid(&self, char_uuid: Uuid, payload: &[u8], with_response: bool) -> Result<()> {
         let c = self
             .characteristics()

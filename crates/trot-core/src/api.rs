@@ -102,6 +102,11 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/rollup/run", post(api_rollup_run))
         .route("/api/export", get(api_export))
         .route("/api/diag", get(api_diag))
+        .route("/api/diagnose", axum::routing::post(diagnose_start))
+        .route(
+            "/api/diagnose/:id",
+            get(diagnose_snapshot).delete(diagnose_stop),
+        )
         .route("/api/mark/speed", post(api_mark_speed))
         .route("/api/data/snapshot", get(api_data_snapshot))
         .route("/api/data/reset", post(api_data_reset))
@@ -170,7 +175,9 @@ async fn guard(State(s): State<Arc<AppState>>, req: Request, next: Next) -> Resp
         *req.method(),
         Method::POST | Method::PUT | Method::DELETE | Method::PATCH
     );
-    if is_write && req.uri().path().starts_with("/api/") {
+    if (is_write && req.uri().path().starts_with("/api/"))
+        || req.uri().path().starts_with("/api/diagnose")
+    {
         let tok = req
             .headers()
             .get("x-sc110-token")
@@ -978,5 +985,48 @@ mod origin_tests {
         ] {
             assert!(!allowed(origin), "must be rejected: {origin}");
         }
+    }
+}
+
+#[derive(Deserialize)]
+struct DiagnoseStart {
+    seconds: u64,
+}
+async fn diagnose_start(State(s): State<Arc<AppState>>, Json(p): Json<DiagnoseStart>) -> Response {
+    match s.diagnostics.start(p.seconds, "attached") {
+        Ok(id) => {
+            if let Some(v) = s
+                .diagnostic_inventory
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+            {
+                s.diagnostics.event(
+                    "inventory_at_attach",
+                    json!({"freshness":"last connection discovery; may be cached", "inventory":v}),
+                );
+            }
+            s.diagnostics.event("attached",json!({"driver":s.driver(),"link_connected":s.connected.load(std::sync::atomic::Ordering::Relaxed),"display_unit":s.display_unit(),"initialization":"not observed unless connection starts during capture","initial_telemetry":s.last_state().as_ref().map(crate::app::state_dict)}));
+            Json(json!({"capture_id":id,"engine_version":env!("CARGO_PKG_VERSION"),"schema":"trot.diagnostic.v1"})).into_response()
+        }
+        Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    }
+}
+async fn diagnose_snapshot(
+    State(s): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Response {
+    match s.diagnostics.snapshot(&id) {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => (StatusCode::NOT_FOUND, e.to_string()).into_response(),
+    }
+}
+async fn diagnose_stop(
+    State(s): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Response {
+    match s.diagnostics.finish(&id, "client_finished") {
+        Ok(()) => Json(json!({"ok":true})).into_response(),
+        Err(e) => (StatusCode::NOT_FOUND, e.to_string()).into_response(),
     }
 }

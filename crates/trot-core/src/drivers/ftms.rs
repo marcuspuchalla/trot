@@ -105,10 +105,10 @@
 
 use super::util::subscribe_staggered;
 use super::{Advertisement, BeltState, Driver, DriverHost, Emit, Sample};
+use crate::diagnostics::Link as Peripheral;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use btleplug::api::{CharPropFlags, Characteristic, Peripheral as _};
-use btleplug::platform::Peripheral;
 use futures::StreamExt;
 use serde::Serialize;
 use std::collections::BTreeSet;

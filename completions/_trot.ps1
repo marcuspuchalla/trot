@@ -26,6 +26,7 @@ Register-ArgumentCompleter -Native -CommandName 'trot' -ScriptBlock {
             [CompletionResult]::new('-V', '-V ', [CompletionResultType]::ParameterName, 'Print version')
             [CompletionResult]::new('--version', '--version', [CompletionResultType]::ParameterName, 'Print version')
             [CompletionResult]::new('daemon', 'daemon', [CompletionResultType]::ParameterValue, 'Run the tracking daemon (talks to the treadmill, serves the API)')
+            [CompletionResult]::new('diagnose', 'diagnose', [CompletionResultType]::ParameterValue, 'Record a bounded BLE support bundle (no upload or workout database)')
             [CompletionResult]::new('today', 'today', [CompletionResultType]::ParameterValue, 'Today''s totals')
             [CompletionResult]::new('status', 'status', [CompletionResultType]::ParameterValue, 'Whether the daemon is up and a treadmill is connected')
             [CompletionResult]::new('log', 'log', [CompletionResultType]::ParameterValue, 'Recent sessions')
@@ -38,6 +39,18 @@ Register-ArgumentCompleter -Native -CommandName 'trot' -ScriptBlock {
             break
         }
         'trot;daemon' {
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
+        'trot;diagnose' {
+            [CompletionResult]::new('--duration', '--duration', [CompletionResultType]::ParameterName, 'Capture duration, including discovery (1–600 seconds)')
+            [CompletionResult]::new('--output', '--output', [CompletionResultType]::ParameterName, 'Destination ZIP; never overwritten. A .partial.json file is retained on failure')
+            [CompletionResult]::new('--device', '--device', [CompletionResultType]::ParameterName, 'Exact advertised name or platform ID (standalone only; duplicate names require picker)')
+            [CompletionResult]::new('--display-unit', '--display-unit', [CompletionResultType]::ParameterName, 'Console display unit for a standalone capture')
+            [CompletionResult]::new('--note', '--note', [CompletionResultType]::ParameterName, 'Optional console readings/model/firmware to accompany the trace; do not include secrets')
+            [CompletionResult]::new('--inventory', '--inventory', [CompletionResultType]::ParameterName, 'Only scan/discover GATT, with no telemetry queries or subscriptions (standalone)')
+            [CompletionResult]::new('--non-interactive', '--non-interactive', [CompletionResultType]::ParameterName, 'Do not show a picker. Requires --device when no daemon is running')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
@@ -91,6 +104,7 @@ Register-ArgumentCompleter -Native -CommandName 'trot' -ScriptBlock {
         }
         'trot;help' {
             [CompletionResult]::new('daemon', 'daemon', [CompletionResultType]::ParameterValue, 'Run the tracking daemon (talks to the treadmill, serves the API)')
+            [CompletionResult]::new('diagnose', 'diagnose', [CompletionResultType]::ParameterValue, 'Record a bounded BLE support bundle (no upload or workout database)')
             [CompletionResult]::new('today', 'today', [CompletionResultType]::ParameterValue, 'Today''s totals')
             [CompletionResult]::new('status', 'status', [CompletionResultType]::ParameterValue, 'Whether the daemon is up and a treadmill is connected')
             [CompletionResult]::new('log', 'log', [CompletionResultType]::ParameterValue, 'Recent sessions')
@@ -103,6 +117,9 @@ Register-ArgumentCompleter -Native -CommandName 'trot' -ScriptBlock {
             break
         }
         'trot;help;daemon' {
+            break
+        }
+        'trot;help;diagnose' {
             break
         }
         'trot;help;today' {

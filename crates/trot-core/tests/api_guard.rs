@@ -297,3 +297,77 @@ async fn diag_reports_the_gate_rejection_counter() {
          PLAUSIBILITY GATE comment in ble.rs: {v}"
     );
 }
+
+// Diagnostic exports contain exact hardware bytes, so GET requires a token too.
+#[tokio::test]
+async fn diagnostics_are_authenticated_and_scoped() {
+    let router = app();
+    for (method, path) in [
+        ("POST", "/api/diagnose"),
+        ("GET", "/api/diagnose/unknown"),
+        ("DELETE", "/api/diagnose/unknown"),
+    ] {
+        let response = router.clone().oneshot(req(method, path)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+    let request = |seconds| {
+        Request::builder()
+            .method("POST")
+            .uri("/api/diagnose")
+            .header("host", "127.0.0.1")
+            .header("content-type", "application/json")
+            .header("x-sc110-token", TOKEN)
+            .body(Body::from(format!("{{\"seconds\":{seconds}}}")))
+            .unwrap()
+    };
+    assert_eq!(
+        router.clone().oneshot(request(601)).await.unwrap().status(),
+        StatusCode::BAD_REQUEST
+    );
+    let response = router.clone().oneshot(request(60)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let id = body["capture_id"].as_str().unwrap();
+    assert_eq!(
+        router.clone().oneshot(request(60)).await.unwrap().status(),
+        StatusCode::BAD_REQUEST
+    );
+    let authenticated = |method, path: &str| {
+        Request::builder()
+            .method(method)
+            .uri(path)
+            .header("host", "127.0.0.1")
+            .header("x-sc110-token", TOKEN)
+            .body(Body::empty())
+            .unwrap()
+    };
+    let response = router
+        .clone()
+        .oneshot(authenticated("GET", &format!("/api/diagnose/{id}")))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["mode"], "attached");
+    assert!(!String::from_utf8_lossy(&bytes).contains(TOKEN));
+    assert!(body.get("sessions").is_none());
+    assert_eq!(
+        router
+            .clone()
+            .oneshot(authenticated("GET", "/api/diagnose/wrong"))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        router
+            .oneshot(authenticated("DELETE", &format!("/api/diagnose/{id}")))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+}

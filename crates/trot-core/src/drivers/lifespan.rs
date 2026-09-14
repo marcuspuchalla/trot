@@ -22,11 +22,11 @@
 //! which opcode we polled last — `Reader` tracks that.
 
 use super::{Advertisement, BeltState, Driver, DriverHost, Emit, Sample};
+use crate::diagnostics::Link as Peripheral;
 use crate::telemetry::{speed_kmh, STATUS_PAUSED, STATUS_RUNNING, STATUS_STANDBY, STATUS_SUMMARY};
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use btleplug::api::{Characteristic, Peripheral as _, WriteType};
-use btleplug::platform::Peripheral;
 use futures::{FutureExt, StreamExt};
 use std::collections::BTreeSet;
 use std::time::Duration;
@@ -298,7 +298,9 @@ impl Driver for LifeSpan {
             // the one for THIS request. Responses don't echo their opcode, so a single
             // buffered/lagging frame would otherwise mis-assign every field (speed
             // reading as steps, etc.).
-            while notifications.next().now_or_never().flatten().is_some() {}
+            while let Some(n) = notifications.next().now_or_never().flatten() {
+                link.record("discard_stale", serde_json::json!({"characteristic":n.uuid,"payload":crate::diagnostics::frame(&n.value)}));
+            }
 
             // Bound the write: a stale link can block the write forever with no
             // disconnect event, which would wedge the worker.
@@ -344,7 +346,10 @@ impl Driver for LifeSpan {
 
             match reader.feed(opcode, &frame) {
                 Ok(readout) => emit(to_sample(&readout, &host.display_unit)),
-                Err(e) => tracing::warn!("decode error opcode 0x{opcode:02x}: {e}"),
+                Err(e) => {
+                    link.record("decode_error",serde_json::json!({"request_opcode":opcode,"association":"inferred","error":e.to_string(),"expected_prefix":REQ_PREFIX,"actual_prefix":frame.first(),"length":frame.len()}));
+                    tracing::warn!("decode error opcode 0x{opcode:02x}: {e}");
+                }
             }
             tokio::time::sleep(POLL_INTERVAL).await;
         }

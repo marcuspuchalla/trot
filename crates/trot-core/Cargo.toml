@@ -24,7 +24,7 @@ async-trait = "0.1"
 thiserror = "2"
 tracing = "0.1"
 # v4 is load-bearing: engine.rs:50 generates the per-launch API token with it.
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "1", features = ["v4", "serde"] }
 chrono = "0.4"
 
 [dev-dependencies]

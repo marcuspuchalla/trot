@@ -289,6 +289,21 @@ request guard, the bounds checks) is covered by
 [`tests/api_guard.rs`](crates/trot-core/tests/api_guard.rs),
 which drives the actual router over HTTP.
 
+## Troubleshooting a treadmill
+
+Run `trot diagnose --duration 90 --output trot-diagnostic.zip` while the problem
+is happening. It attaches to a compatible daemon; otherwise it offers a temporary
+BLE device picker, without saving pairing or workout data. Close other treadmill
+apps before standalone capture. If an old daemon is running, update/restart it
+normally or stop it before trying again; the command never starts a second
+connection behind it.
+
+The ZIP contains versions, selected-device discovery/driver decisions, exact
+query/reply bytes and a readable summary. Review it before sharing: account
+credentials and history are excluded, but raw BLE bytes and target names can
+identify hardware. See [diagnostic capture](docs/diagnostics.md) for commands,
+privacy, limitations and what console readings to include in a support report.
+
 ## Contributing
 
 The most useful contribution is a **treadmill report**: if Trot can't read yours,

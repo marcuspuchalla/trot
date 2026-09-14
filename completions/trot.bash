@@ -25,6 +25,9 @@ _trot() {
             trot,devices)
                 cmd="trot__subcmd__devices"
                 ;;
+            trot,diagnose)
+                cmd="trot__subcmd__diagnose"
+                ;;
             trot,help)
                 cmd="trot__subcmd__help"
                 ;;
@@ -55,6 +58,9 @@ _trot() {
             trot__subcmd__help,devices)
                 cmd="trot__subcmd__help__subcmd__devices"
                 ;;
+            trot__subcmd__help,diagnose)
+                cmd="trot__subcmd__help__subcmd__diagnose"
+                ;;
             trot__subcmd__help,help)
                 cmd="trot__subcmd__help__subcmd__help"
                 ;;
@@ -83,7 +89,7 @@ _trot() {
 
     case "${cmd}" in
         trot)
-            opts="-h -V --help --version daemon today status log scan devices pair unpair completions help"
+            opts="-h -V --help --version daemon diagnose today status log scan devices pair unpair completions help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 1 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -138,8 +144,42 @@ _trot() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
+        trot__subcmd__diagnose)
+            opts="-h --duration --output --device --inventory --non-interactive --display-unit --note --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --duration)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --output)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --device)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --display-unit)
+                    COMPREPLY=($(compgen -W "km/h mph" -- "${cur}"))
+                    return 0
+                    ;;
+                --note)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
         trot__subcmd__help)
-            opts="daemon today status log scan devices pair unpair completions help"
+            opts="daemon diagnose today status log scan devices pair unpair completions help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -181,6 +221,20 @@ _trot() {
             return 0
             ;;
         trot__subcmd__help__subcmd__devices)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        trot__subcmd__help__subcmd__diagnose)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )

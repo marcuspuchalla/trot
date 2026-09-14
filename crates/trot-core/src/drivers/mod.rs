@@ -30,10 +30,10 @@ pub mod sperax;
 pub mod urevo;
 pub mod util;
 
+use crate::diagnostics::Link as Peripheral;
 use anyhow::Result;
 use async_trait::async_trait;
 use btleplug::api::Characteristic;
-use btleplug::platform::Peripheral;
 use std::collections::BTreeSet;
 use uuid::Uuid;
 

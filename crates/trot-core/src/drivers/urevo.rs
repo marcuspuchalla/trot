@@ -88,10 +88,10 @@
 
 use super::util::{run_init_sequence, GattIo, InitStep};
 use super::{Advertisement, BeltState, Driver, DriverHost, Emit, Sample};
+use crate::diagnostics::Link as Peripheral;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use btleplug::api::{CharPropFlags, Characteristic, Peripheral as _};
-use btleplug::platform::Peripheral;
 use futures::StreamExt;
 use std::collections::BTreeSet;
 use std::time::Duration;

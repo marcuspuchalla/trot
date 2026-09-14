@@ -23,6 +23,7 @@ set edit:completion:arg-completer[trot] = {|@words|
             cand -V 'Print version'
             cand --version 'Print version'
             cand daemon 'Run the tracking daemon (talks to the treadmill, serves the API)'
+            cand diagnose 'Record a bounded BLE support bundle (no upload or workout database)'
             cand today 'Today''s totals'
             cand status 'Whether the daemon is up and a treadmill is connected'
             cand log 'Recent sessions'
@@ -34,6 +35,17 @@ set edit:completion:arg-completer[trot] = {|@words|
             cand help 'Print this message or the help of the given subcommand(s)'
         }
         &'trot;daemon'= {
+            cand -h 'Print help'
+            cand --help 'Print help'
+        }
+        &'trot;diagnose'= {
+            cand --duration 'Capture duration, including discovery (1–600 seconds)'
+            cand --output 'Destination ZIP; never overwritten. A .partial.json file is retained on failure'
+            cand --device 'Exact advertised name or platform ID (standalone only; duplicate names require picker)'
+            cand --display-unit 'Console display unit for a standalone capture'
+            cand --note 'Optional console readings/model/firmware to accompany the trace; do not include secrets'
+            cand --inventory 'Only scan/discover GATT, with no telemetry queries or subscriptions (standalone)'
+            cand --non-interactive 'Do not show a picker. Requires --device when no daemon is running'
             cand -h 'Print help'
             cand --help 'Print help'
         }
@@ -78,6 +90,7 @@ set edit:completion:arg-completer[trot] = {|@words|
         }
         &'trot;help'= {
             cand daemon 'Run the tracking daemon (talks to the treadmill, serves the API)'
+            cand diagnose 'Record a bounded BLE support bundle (no upload or workout database)'
             cand today 'Today''s totals'
             cand status 'Whether the daemon is up and a treadmill is connected'
             cand log 'Recent sessions'
@@ -89,6 +102,8 @@ set edit:completion:arg-completer[trot] = {|@words|
             cand help 'Print this message or the help of the given subcommand(s)'
         }
         &'trot;help;daemon'= {
+        }
+        &'trot;help;diagnose'= {
         }
         &'trot;help;today'= {
         }

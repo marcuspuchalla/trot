@@ -257,6 +257,7 @@ async fn cancelled(state: &Arc<AppState>, device_id: &str) {
 /// still `true` — a normal reconnect, not a failure), `Ok(false)` if we never
 /// reached the treadmill (counts toward the give-up limit).
 async fn connect_and_poll(state: &Arc<AppState>, device_id: &str) -> Result<bool> {
+    state.diagnostics.event("connect_start", json!({}));
     tracing::info!("connecting to {device_id}...");
     let adapter = first_adapter().await?;
     let peripheral = match find_peripheral(&adapter, device_id).await {
@@ -267,10 +268,17 @@ async fn connect_and_poll(state: &Arc<AppState>, device_id: &str) -> Result<bool
         }
     };
     if let Err(e) = peripheral.connect().await {
+        state
+            .diagnostics
+            .event("connect_error", json!({"error":format!("{e:#}")}));
         tracing::warn!("connect to {device_id} failed: {e:#}");
         return Ok(false);
     }
+    state.diagnostics.event("link_connected", json!({}));
     if let Err(e) = peripheral.discover_services().await {
+        state
+            .diagnostics
+            .event("discovery_error", json!({"error":format!("{e:#}")}));
         tracing::warn!("service discovery failed: {e:#}");
         let _ = peripheral.disconnect().await;
         return Ok(false);
@@ -287,6 +295,12 @@ async fn connect_and_poll(state: &Arc<AppState>, device_id: &str) -> Result<bool
     // The full supporter set, not just the winner: registry order is
     // load-bearing and untestable against real hardware, so the dispatch
     // line below records every driver that would have claimed this device.
+    let inventory = crate::diagnostics::inventory(&adv, &gatt);
+    *state
+        .diagnostic_inventory
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = Some(inventory.clone());
+    state.diagnostics.event("inventory", inventory);
     let supporters = drivers::supporters(&adv, &gatt);
     let driver = match drivers::for_device(&adv, &gatt) {
         Some(d) => d,
@@ -305,26 +319,44 @@ async fn connect_and_poll(state: &Arc<AppState>, device_id: &str) -> Result<bool
     // its wire format with it and `from_sample` re-encodes with it, and the two
     // MUST agree or raw values would drift on a mid-session unit change.
     let unit = state.display_unit();
-    let recorder = |tag: u8, frame: &[u8]| state.record_frame(tag, frame);
+    state.diagnostics.event(
+        "driver_selected",
+        json!({"driver":driver.id(),"display_unit":unit}),
+    );
+    let recorder = |tag: u8, frame: &[u8]| {
+        state.record_frame(tag, frame);
+        state.diagnostics.event("driver_frame", json!({"tag":tag,"tag_semantics":"driver assigned, not necessarily echoed by device","payload":crate::diagnostics::frame(frame)}));
+    };
     let host = DriverHost::new(unit.clone(), &recorder);
 
     let mut ing = IngestState::default();
     let mut emit = |sample: Sample| {
+        state
+            .diagnostics
+            .event("decoded_sample", crate::diagnostics::sample(&sample));
         let telem = Telemetry::from_sample(&sample, &unit);
         // `ingest_sample` returns the GATED telemetry; broadcast that, so a
         // field the plausibility gate stripped never reaches /ws either.
         let telem = ingest_sample(state, &telem, unix_now(), &mut ing);
+        state
+            .diagnostics
+            .event("published_telemetry", state_dict(&telem));
         broadcast_state(state, &telem);
     };
 
     // The driver runs until the link errors; we cancel it on shutdown, pause,
     // or device switch. Either way the disconnect below is ours, not the
     // driver's — a driver never manages the link's lifecycle.
+    let observed = crate::diagnostics::Link::new(peripheral.clone(), state.diagnostics.clone());
     let outcome = tokio::select! {
-        r = driver.run(&peripheral, &host, &mut emit) => r,
+        r = driver.run(&observed, &host, &mut emit) => r,
         _ = cancelled(state, device_id) => Ok(()),
     };
     let _ = peripheral.disconnect().await;
+    state.diagnostics.event(
+        "disconnected",
+        json!({"error":outcome.as_ref().err().map(|e|format!("{e:#}"))}),
+    );
     if let Err(e) = outcome {
         tracing::warn!("BLE session ended: {e:#}");
     }

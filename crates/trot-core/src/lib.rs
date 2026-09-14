@@ -9,6 +9,7 @@ pub mod app;
 pub mod ble;
 pub mod config;
 pub mod db;
+pub mod diagnostics;
 pub mod drivers;
 pub mod engine;
 pub mod telemetry;

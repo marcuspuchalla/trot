@@ -31,6 +31,8 @@ pub struct AppState {
     /// send it; it stops other local processes and cross-site requests from driving
     /// the loopback API. Enforced by the request `guard` in `api.rs`.
     pub token: String,
+    pub diagnostics: Arc<crate::diagnostics::Capture>,
+    pub diagnostic_inventory: Mutex<Option<Value>>,
     pub device_id: Mutex<Option<String>>,
     pub connected: AtomicBool,
     /// The id of the driver whose `supports()` claimed the current (or most
@@ -118,6 +120,8 @@ impl AppState {
             hub,
             display_unit: Mutex::new(display_unit),
             token,
+            diagnostics: Arc::new(crate::diagnostics::Capture::default()),
+            diagnostic_inventory: Mutex::new(None),
             device_id: Mutex::new(device_id),
             connected: AtomicBool::new(false),
             driver: Mutex::new(None),

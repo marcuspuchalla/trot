@@ -5,6 +5,8 @@
 //! daemon's handshake file and query that API — so the CLI and any UI see the
 //! exact same data.
 
+mod diagnose;
+
 use anyhow::{Context, Result};
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use std::io::IsTerminal;
@@ -190,6 +192,8 @@ struct Cli {
 enum Cmd {
     /// Run the tracking daemon (talks to the treadmill, serves the API).
     Daemon,
+    /// Record a bounded BLE support bundle (no upload or workout database).
+    Diagnose(diagnose::Options),
     /// Today's totals.
     Today,
     /// Whether the daemon is up and a treadmill is connected.
@@ -262,6 +266,7 @@ fn main() -> Result<()> {
     }
     match Cli::from_arg_matches(&cmd.get_matches())?.cmd {
         Cmd::Daemon => run_daemon(),
+        Cmd::Diagnose(options) => diagnose::run(options),
         Cmd::Today => cmd_today(),
         Cmd::Status => cmd_status(),
         Cmd::Log { week, limit } => cmd_log(week, limit),

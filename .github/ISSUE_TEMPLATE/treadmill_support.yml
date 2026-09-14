@@ -5,13 +5,11 @@ body:
   - type: markdown
     attributes:
       value: |
-        Only LifeSpan is tested on real hardware here — everything else is
-        generic FTMS, inferred from the Bluetooth spec. A good report is the one
-        thing nobody else can provide, so thank you.
-
-        Closed ecosystems (**iFit**/NordicTrack/ProForm, **Peloton**, **Echelon**)
-        don't broadcast their data at all, so no third-party tool can read them.
-        If yours is one of those, sadly there's nothing to add.
+        Hardware captures help us investigate models we do not own. Please use
+        `trot diagnose --duration 90 --output trot-diagnostic.zip` and review the
+        archive before attaching it. Raw BLE bytes and device names may identify
+        your hardware; credentials and workout history are not included.
+        See docs/diagnostics.md for details. This records data, never belt control.
   - type: input
     id: model
     attributes:
@@ -45,3 +43,8 @@ body:
       description: Does it pair and report nothing, connect then drop, or never appear at all?
     validations:
       required: true
+  - type: textarea
+    id: diagnostic
+    attributes:
+      label: Diagnostic bundle and console observations
+      description: Attach the reviewed ZIP, or share summary.txt first. Include Trot/Nowhere versions, console firmware if known, display units and observed speed/steps/time/distance. Do not post tokens or account credentials.

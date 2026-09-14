@@ -34,6 +34,19 @@ _arguments "${_arguments_options[@]}" : \
 '--help[Print help]' \
 && ret=0
 ;;
+(diagnose)
+_arguments "${_arguments_options[@]}" : \
+'--duration=[Capture duration, including discovery (1–600 seconds)]:DURATION:_default' \
+'--output=[Destination ZIP; never overwritten. A .partial.json file is retained on failure]:OUTPUT:_files' \
+'--device=[Exact advertised name or platform ID (standalone only; duplicate names require picker)]:DEVICE:_default' \
+'--display-unit=[Console display unit for a standalone capture]:DISPLAY_UNIT:(km/h mph)' \
+'--note=[Optional console readings/model/firmware to accompany the trace; do not include secrets]:NOTE:_default' \
+'--inventory[Only scan/discover GATT, with no telemetry queries or subscriptions (standalone)]' \
+'--non-interactive[Do not show a picker. Requires --device when no daemon is running]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
 (today)
 _arguments "${_arguments_options[@]}" : \
 '-h[Print help]' \
@@ -107,6 +120,10 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
+(diagnose)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
 (today)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
@@ -156,6 +173,7 @@ esac
 _trot_commands() {
     local commands; commands=(
 'daemon:Run the tracking daemon (talks to the treadmill, serves the API)' \
+'diagnose:Record a bounded BLE support bundle (no upload or workout database)' \
 'today:Today'\''s totals' \
 'status:Whether the daemon is up and a treadmill is connected' \
 'log:Recent sessions' \
@@ -183,10 +201,16 @@ _trot__subcmd__devices_commands() {
     local commands; commands=()
     _describe -t commands 'trot devices commands' commands "$@"
 }
+(( $+functions[_trot__subcmd__diagnose_commands] )) ||
+_trot__subcmd__diagnose_commands() {
+    local commands; commands=()
+    _describe -t commands 'trot diagnose commands' commands "$@"
+}
 (( $+functions[_trot__subcmd__help_commands] )) ||
 _trot__subcmd__help_commands() {
     local commands; commands=(
 'daemon:Run the tracking daemon (talks to the treadmill, serves the API)' \
+'diagnose:Record a bounded BLE support bundle (no upload or workout database)' \
 'today:Today'\''s totals' \
 'status:Whether the daemon is up and a treadmill is connected' \
 'log:Recent sessions' \
@@ -213,6 +237,11 @@ _trot__subcmd__help__subcmd__daemon_commands() {
 _trot__subcmd__help__subcmd__devices_commands() {
     local commands; commands=()
     _describe -t commands 'trot help devices commands' commands "$@"
+}
+(( $+functions[_trot__subcmd__help__subcmd__diagnose_commands] )) ||
+_trot__subcmd__help__subcmd__diagnose_commands() {
+    local commands; commands=()
+    _describe -t commands 'trot help diagnose commands' commands "$@"
 }
 (( $+functions[_trot__subcmd__help__subcmd__help_commands] )) ||
 _trot__subcmd__help__subcmd__help_commands() {
