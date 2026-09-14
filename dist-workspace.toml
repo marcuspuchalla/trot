@@ -6,6 +6,9 @@ members = ["cargo:."]
 [dist]
 cargo-dist-version = "0.32.0"
 ci = "github"
+# Keep the explicit host quality gate: cargo-dist 0.32 permits skipped builds
+# after a failed custom test job. See docs/releasing.md before regenerating CI.
+allow-dirty = ["ci"]
 # Codesign the macOS binaries with the Developer ID cert held in the
 # CODESIGN_* secrets. dist signs but does NOT notarize (there is no notarytool
 # anywhere in 0.32.0) — .github/workflows/notarize-macos.yml does that after the
@@ -14,8 +17,8 @@ macos-sign = true
 # Adds CODESIGN_OPTIONS=runtime to the build job — see the file for why.
 github-build-setup = "../dist/build-setup.yml"
 installers = ["shell", "powershell"]
-# Gate the release on the test suite. `plan` is the first stage and every build
-# job depends on it, so if ./test fails NOTHING is built, uploaded or published.
+# Gate artifact builds on the test suite. The explicit host condition in
+# release.yml also gates publication (generated CI alone does not).
 # It reuses .github/workflows/test.yml — the same gate a pull request runs, so a
 # release can't be cut against code a PR would have rejected.
 plan-jobs = ["./test"]

@@ -102,3 +102,11 @@ happened building 0.1.13 locally: the App Store Connect key was present but
 named `NOWHERE_API_*` while Tauri only reads `APPLE_API_*`, so notarization was
 skipped silently. `scripts/build-macos.sh` now maps the names and notarizes the
 disk image itself, which Tauri does not do.
+
+### Preserve the publication gate
+
+`release.yml` has an explicit `host` dependency on `custom-test` and requires
+both artifact build jobs to succeed. cargo-dist 0.32 generated a host condition
+that allowed skipped builds after failed tests and published an empty 0.5.1
+release. `allow-dirty = ["ci"]` preserves this correction. If regenerating CI,
+reapply the dependency and success conditions before committing.

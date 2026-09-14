@@ -9,7 +9,31 @@ commit messages.
 
 ## Unreleased
 
-<!-- Nothing yet. Write what changed here; a release cannot be cut from an empty section. -->
+### Added
+- **`trot diagnose --duration 90 --output trot-diagnostic.zip` records a support
+  bundle when discovery, connection or decoding fails.** It captures exact BLE
+  writes and notifications across the six drivers, the selected device's GATT
+  table and real matching decisions, versions, sample output and collection
+  failures. LifeSpan captures include stale discarded replies and detailed
+  prefix failures, so reports like the DT3-BT issue can include the missing bytes.
+- Capture attaches to a compatible running daemon, or scans/selects a treadmill
+  in isolated mode without opening a workout database, changing pairing or
+  starting sync. `--inventory` makes no telemetry queries or subscriptions;
+  unknown fallback devices receive inventory only. `--note` can include console
+  readings and model details. No new treadmill query or control commands are added.
+- Reports are bounded and retain a partial checkpoint if interrupted. Export
+  requires the launch token when attached. Credentials and workout history are
+  excluded; target names, raw BLE bytes and backend errors can still contain
+  identifying data, so review before sharing. See `docs/diagnostics.md`.
+
+This release collects evidence; it does not yet claim a fix for the DT3-BT
+protocol or complete offline replay of accounting state.
+
+
+### Fixed
+- Build diagnostic HTTP capture with Rust 1.98 and require successful tests and
+  all platform builds before publishing. The 0.5.1 build failed and shipped no
+  binaries; use this patch for the diagnostic command.
 
 ## 0.5.1
 

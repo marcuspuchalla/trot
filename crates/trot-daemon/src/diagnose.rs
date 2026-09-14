@@ -119,7 +119,10 @@ fn request(port: u16, token: &str, method: &str, path: &str) -> ureq::Request {
 }
 async fn attached(port: u16, token: &str, seconds: u64, journal: &mut std::fs::File) -> Value {
     let start = request(port, token, "POST", "/api/diagnose").send_json(json!({"seconds":seconds}));
-    let start: Value = match start.and_then(|r| r.into_json().map_err(Into::into)) {
+    let start: Value = match start
+        .map_err(anyhow::Error::from)
+        .and_then(|r| r.into_json().map_err(anyhow::Error::from))
+    {
         Ok(v) => v,
         Err(_) => {
             return json!({"schema":"trot.diagnostic.v1","events":[],"mode":"attached","error":"Running engine does not accept diagnostic capture (older version, authentication failure or another capture active). Update/restart it normally, or quit Nowhere and the old daemon and rerun this command. No second BLE connection was opened."})
@@ -139,7 +142,8 @@ async fn attached(port: u16, token: &str, seconds: u64, journal: &mut std::fs::F
     loop {
         match request(port, token, "GET", &format!("/api/diagnose/{id}"))
             .call()
-            .and_then(|r| r.into_json().map_err(Into::into))
+            .map_err(anyhow::Error::from)
+            .and_then(|r| r.into_json().map_err(anyhow::Error::from))
         {
             Ok(v) => {
                 last = v;
@@ -166,7 +170,8 @@ async fn attached(port: u16, token: &str, seconds: u64, journal: &mut std::fs::F
     let _ = request(port, token, "DELETE", &format!("/api/diagnose/{id}")).call();
     if let Ok(v) = request(port, token, "GET", &format!("/api/diagnose/{id}"))
         .call()
-        .and_then(|r| r.into_json::<Value>().map_err(Into::into))
+        .map_err(anyhow::Error::from)
+        .and_then(|r| r.into_json::<Value>().map_err(anyhow::Error::from))
     {
         let reason = last["client_end_reason"].clone();
         last = v;

@@ -1,6 +1,6 @@
 # Collecting a treadmill diagnostic
 
-Available in Trot 0.5.1 and later. This collects evidence, not a compatibility fix.
+Available in Trot 0.5.2 and later. This collects evidence, not a compatibility fix.
 
 ```sh
 trot --version
