@@ -9,6 +9,10 @@ commit messages.
 
 ## Unreleased
 
+<!-- Nothing yet. Write what changed here; a release cannot be cut from an empty section. -->
+
+## 0.5.2
+
 ### Added
 - **`trot diagnose --duration 90 --output trot-diagnostic.zip` records a support
   bundle when discovery, connection or decoding fails.** It captures exact BLE

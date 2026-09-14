@@ -1,6 +1,6 @@
 [package]
 name = "trot-core"
-version = "0.5.1"
+version = "0.5.2"
 description = "TROT tracking engine: device ingestion, sessions, storage, and the local HTTP/WS API."
 edition.workspace = true
 license.workspace = true
