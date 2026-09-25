@@ -9,7 +9,14 @@ commit messages.
 
 ## Unreleased
 
-<!-- Nothing yet. Write what changed here; a release cannot be cut from an empty section. -->
+- **PitPat: steps on the SupeRun BA09-B.** This pad (advertises as
+  `PitPat-T01`, sold as DeerRun) always sends zero in the usual step field;
+  Trot now reads its step counter from its 60-byte status frame, so steps are
+  recorded instead of staying at 0. Verified on real hardware.
+- **PitPat: reconnecting no longer gives up.** After the first connection the
+  pad reports its Bluetooth module's default name (`Mindtree-HID`), which Trot
+  refused on every reconnect until auto-connect gave up. That name now counts
+  as no name, so the pad is recognised by its PitPat Bluetooth layout.
 
 ## 0.5.2
 
