@@ -537,7 +537,14 @@ fn a_stale_session_baseline_self_heals_and_the_day_reconciles() {
 
 /// A SupeRun BA09-B status frame (60 bytes, fw 37) on the layout of the real
 /// capture, decoded by the real parser and converted by the real `to_sample`.
-fn ba09_telem(running: bool, speed_raw: u16, dist_m: u32, steps: u16, kcal: u16, dur_ms: u32) -> Telemetry {
+fn ba09_telem(
+    running: bool,
+    speed_raw: u16,
+    dist_m: u32,
+    steps: u16,
+    kcal: u16,
+    dur_ms: u32,
+) -> Telemetry {
     let mut f = vec![0u8; 60];
     f[0] = 0x67;
     f[1] = 60;
@@ -546,7 +553,11 @@ fn ba09_telem(running: bool, speed_raw: u16, dist_m: u32, steps: u16, kcal: u16,
     f[18..20].copy_from_slice(&kcal.to_be_bytes());
     f[20..24].copy_from_slice(&dur_ms.to_be_bytes());
     f[25] = 0x25;
-    f[26] = if running { pitpat::STATE_RUNNING } else { pitpat::STATE_STOPPED };
+    f[26] = if running {
+        pitpat::STATE_RUNNING
+    } else {
+        pitpat::STATE_STOPPED
+    };
     f[43..45].copy_from_slice(&steps.to_be_bytes());
     f[59] = pitpat::TERMINATOR;
     f[58] = pitpat::frame_checksum(&f);
@@ -559,7 +570,14 @@ fn ba09_walk_keeps_its_steps_when_the_counter_resets_on_stop() {
     let mut rig = Rig::new("km/h");
     rig.push(&ba09_telem(false, 0, 0, 0, 0, 0));
     for i in 1..=10u32 {
-        rig.push(&ba09_telem(true, 4000, i * 8, (i * 10) as u16, (i / 3) as u16, i * 5000));
+        rig.push(&ba09_telem(
+            true,
+            4000,
+            i * 8,
+            (i * 10) as u16,
+            (i / 3) as u16,
+            i * 5000,
+        ));
     }
     // Belt stops: steps/kcal/duration drop to 0, distance stays.
     rig.push(&ba09_telem(false, 0, 80, 0, 0, 0));
