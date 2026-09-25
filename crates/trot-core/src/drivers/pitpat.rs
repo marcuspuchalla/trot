@@ -113,7 +113,7 @@
 //! bytes 3..5:   current speed, thousandths of km/h
 //! bytes 5..7:   target speed (decoded upstream; no Sample field — unparsed)
 //! bytes 7..11:  distance, thousandths of km — i.e. metres
-//! bytes 14..18: steps
+//! bytes 14..18: steps (zero on the 60-byte BA09-B frame; see `steps_of`)
 //! bytes 18..20: energy, kcal
 //! bytes 20..24: elapsed time — ms on firmware ≥20, SECONDS before (azmke's
 //!               firmware-conditional rule; the fw byte is in the frame, so
@@ -416,6 +416,26 @@ fn u32_be(frame: &[u8], at: usize) -> u32 {
     u32::from_be_bytes([frame[at], frame[at + 1], frame[at + 2], frame[at + 3]])
 }
 
+/// Frame length of the SupeRun BA09-B status frame (fw 37).
+const EXT_FRAME_LEN: usize = 60;
+/// Offset of that model's step counter (big-endian u16).
+const EXT_STEPS_AT: usize = 43;
+
+/// Steps as the frame carries them. The field at 14..18 is the one every
+/// upstream decodes, but on the 60-byte SupeRun BA09-B frame it is always
+/// zero and the session step counter sits at 43..45 instead (verified on
+/// real hardware against a manual count, 2026-09-25). The legacy field wins
+/// whenever it is non-zero, and only frames of exactly that length read the
+/// tail, so other models are unaffected.
+fn steps_of(frame: &[u8]) -> u32 {
+    let legacy = u32_be(frame, 14);
+    if legacy == 0 && frame.len() == EXT_FRAME_LEN {
+        u16_be(frame, EXT_STEPS_AT)
+    } else {
+        legacy
+    }
+}
+
 /// Parse a bare (envelope-free) status frame. Pure function of the bytes;
 /// never panics on malformed input.
 ///
@@ -439,7 +459,7 @@ pub fn parse_status(frame: &[u8]) -> Result<Status, ProtocolError> {
     Ok(Status {
         speed_raw: u16_be(frame, 3),
         distance_raw: u32_be(frame, 7),
-        steps: u32_be(frame, 14),
+        steps: steps_of(frame),
         calories: u16_be(frame, 18),
         duration_raw: u32_be(frame, 20),
         fw_version: frame[25],
@@ -1314,5 +1334,68 @@ mod tests {
             &adv("PitPat-T01"),
             &gatt(&[(DEERRUN_WRITE_UUID, N), (DEERRUN_NOTIFY_UUID, W)])
         ));
+    }
+
+    // ---- Real SupeRun BA09-B frames ("PitPat-T01", fw 37, 60 bytes) ---------
+    //
+    // Captured with `trot diagnose` on 2026-09-25. Bytes 14..18 stay zero on
+    // this model; the session step counter is a big-endian u16 at 43..45
+    // (rises ~100/min at 4 km/h, matches a manual count, resets on stop).
+
+    fn from_hex(s: &str) -> Vec<u8> {
+        s.split_whitespace()
+            .map(|b| u8::from_str_radix(b, 16).unwrap())
+            .collect()
+    }
+
+    /// Walking at 4.0 km/h, 86 m, 6 kcal, 90 s — counter 124.
+    const BA09_WALK_124: &str = "67 3c 00 0f a0 0f a0 00 00 00 56 00 00 00 00 00 00 00 00 06 00 01 5f 90 52 25 08 17 70 00 05 02 00 00 00 00 00 00 00 00 26 07 d5 00 7c 00 00 05 00 00 00 00 00 00 00 00 00 00 30 43";
+    /// 39 s later: 130 m, 9 kcal, 129 s — counter 191.
+    const BA09_WALK_191: &str = "67 3c 00 0f a0 0f a0 00 00 00 82 00 00 00 00 00 00 00 00 09 00 01 f7 e8 52 25 08 17 70 00 05 02 00 00 00 00 00 00 00 00 0e 07 db 00 bf 00 00 05 00 00 00 00 00 00 00 00 00 00 de 43";
+    /// Belt stopped: duration/kcal/steps reset to 0, distance (229 m) stays.
+    const BA09_IDLE_AFTER_STOP: &str = "67 3c 00 00 00 00 00 00 00 00 e5 00 00 00 00 00 00 00 00 00 00 00 00 00 52 25 00 17 70 00 05 02 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 05 00 00 00 00 00 00 00 00 00 00 cb 43";
+
+    #[test]
+    fn ba09_reads_steps_from_the_extended_tail() {
+        let s = parse_status(&from_hex(BA09_WALK_124)).unwrap();
+        assert_eq!(s.steps, 124);
+        assert_eq!(s.speed_raw, 4000);
+        assert_eq!(s.distance_raw, 86);
+        assert_eq!(s.calories, 6);
+        assert_eq!(s.duration_raw, 90_000);
+        assert_eq!(s.flags & STATE_MASK, STATE_RUNNING);
+    }
+
+    #[test]
+    fn ba09_step_field_is_read_only_on_exactly_60_byte_frames() {
+        // Only the 60-byte layout is verified; a longer frame from another
+        // model may carry something else at 43..45.
+        let mut longer = from_hex(BA09_WALK_124);
+        longer.insert(longer.len() - 2, 0x00);
+        assert_eq!(steps_of(&longer), 0);
+    }
+
+    #[test]
+    fn ba09_step_counter_rises_across_frames() {
+        let s = parse_status(&from_hex(BA09_WALK_191)).unwrap();
+        assert_eq!(s.steps, 191);
+        assert_eq!(to_sample(&s).steps, Some(191));
+    }
+
+    #[test]
+    fn ba09_idle_frame_after_stop_reads_zero_steps() {
+        let s = parse_status(&from_hex(BA09_IDLE_AFTER_STOP)).unwrap();
+        assert_eq!(s.steps, 0);
+        assert_eq!(s.distance_raw, 229);
+        assert_eq!(s.flags & STATE_MASK, STATE_STOPPED);
+    }
+
+    #[test]
+    fn legacy_step_field_wins_when_non_zero_on_a_60_byte_frame() {
+        let mut f = from_hex(BA09_WALK_124);
+        f[14..18].copy_from_slice(&2211u32.to_be_bytes());
+        let n = f.len();
+        f[n - 2] = frame_checksum(&f);
+        assert_eq!(parse_status(&f).unwrap().steps, 2211);
     }
 }
