@@ -211,6 +211,12 @@ pub const V1910_NOTIFY_UUID: Uuid = super::sig_uuid(0x2b10);
 /// Name prefixes of pads verified to speak this protocol.
 pub const ADV_NAME_PREFIXES: &[&str] = &["PITPAT-T"];
 
+/// Default GAP device names of BLE modules, not of a treadmill. A SupeRun
+/// BA09-B advertises `PitPat-T01`, but once connected BlueZ replaces the name
+/// with the GAP one (`Mindtree-HID`), so every reconnect saw a foreign name.
+/// These count as no name: only the nameless FBA0 rule can claim them.
+const MODULE_DEFAULT_NAMES: &[&str] = &["MINDTREE-HID"];
+
 // ---- Wire constants ---------------------------------------------------------
 
 /// Outbound frame prefix (requests). Inbound frames carried 0x68 on the one
@@ -585,8 +591,9 @@ impl Driver for PitPat {
         let Some(transport) = select_transport(gatt) else {
             return false;
         };
-        matches_name(&adv.name)
-            || (normalized(&adv.name).is_empty() && transport == Transport::PitPat)
+        let name = normalized(&adv.name);
+        let nameless = name.is_empty() || MODULE_DEFAULT_NAMES.contains(&name.as_str());
+        matches_name(&adv.name) || (nameless && transport == Transport::PitPat)
     }
 
     async fn run(&self, link: &Peripheral, host: &DriverHost<'_>, emit: Emit<'_>) -> Result<()> {
@@ -1315,6 +1322,12 @@ mod tests {
         assert!(!PitPat.supports(&adv(""), &gatt(&superun_shape())));
         assert!(!PitPat.supports(&adv(""), &gatt(&deerrun_shape())));
         assert!(!PitPat.supports(&adv(""), &gatt(&v1910_shape())));
+        // The BLE module's default GAP name (what BlueZ reports once a
+        // SupeRun BA09-B has been connected) counts as no name: FBA0 only.
+        assert!(PitPat.supports(&adv("Mindtree-HID"), &gatt(&pitpat_shape())));
+        assert!(!PitPat.supports(&adv("Mindtree-HID"), &gatt(&superun_shape())));
+        assert!(!PitPat.supports(&adv("Mindtree-HID"), &gatt(&deerrun_shape())));
+        assert!(!PitPat.supports(&adv("Mindtree-HID"), &gatt(&v1910_shape())));
         // A foreign or carved-out name: refused on every shape.
         for name in ["PITPAT-S1", "LifeSpan-TM", "Mystery Pad 3000"] {
             assert!(
