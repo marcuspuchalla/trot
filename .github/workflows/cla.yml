@@ -1,0 +1,17 @@
+name: Contributor agreement
+on:
+  pull_request_target:
+    types: [opened, edited, synchronize, reopened, ready_for_review]
+permissions:
+  contents: read
+jobs:
+  agreement:
+    runs-on: ubuntu-latest
+    steps:
+      # No checkout or execution of PR code: the event body is untrusted data.
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const body = context.payload.pull_request.body || '';
+            const agreed = /^- \[x\] I have read and agree to the \[Trot CLA version 2\]\(https:\/\/github\.com\/marcuspuchalla\/trot\/blob\/main\/CLA\.md\) \(7 October 2026\), including proprietary Nowhere use and sublicensing\/transfer to its operating company\. I have authority to grant these rights\.$/mi.test(body);
+            if (!agreed) core.setFailed('The contributor must explicitly accept CLA version 2. Do not check the box on their behalf. Older agreements require manual review and separate recorded consent.');
