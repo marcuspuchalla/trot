@@ -9,13 +9,14 @@ rust-version.workspace = true
 repository.workspace = true
 
 [dependencies]
+trot-accounting = { path = "../trot-accounting" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.7", features = ["ws"] }
 tower-http = { version = "0.5", features = ["cors"] }
 btleplug = "0.11"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.32", features = ["bundled", "functions"] }
 futures = "0.3"
 anyhow = "1"
 # Makes the Driver trait's async `run` dyn-dispatchable (native `async fn in
@@ -26,6 +27,8 @@ tracing = "0.1"
 # v4 is load-bearing: engine.rs:50 generates the per-launch API token with it.
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = "0.4"
+chrono-tz = "0.10"
+iana-time-zone = "0.1"
 
 [dev-dependencies]
 # test-util gives tests a pausable clock, so supervisor/backoff tests don't

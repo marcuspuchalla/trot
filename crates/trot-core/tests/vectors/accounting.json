@@ -1,0 +1,11 @@
+[
+  {"name":"nonzero opener", "values":[100,110], "sessions":[1,1], "totals":{"1":110}},
+  {"name":"reconnect keeps odometer", "values":[100,110,115,120], "sessions":[1,1,2,2], "totals":{"1":110,"2":10}},
+  {"name":"reset", "values":[100,110,0,5,10], "sessions":[1,1,2,2,2], "totals":{"1":110,"2":10}},
+  {"name":"isolated high", "values":[100,110,1000,115,120], "sessions":[1,1,1,1,1], "totals":{"1":120}},
+  {"name":"isolated low", "values":[1000,1005,100,1010,1015], "sessions":[1,1,1,1,1], "totals":{"1":1015}},
+  {"name":"stale opener", "values":[5000,1800,1805], "sessions":[1,1,1], "totals":{"1":1805}},
+  {"name":"shallow dip", "values":[100,110,105,115], "sessions":[1,1,1,1], "totals":{"1":115}},
+  {"name":"missing field", "values":[100,null,110], "sessions":[1,1,2], "totals":{"1":100,"2":10}},
+  {"name":"counter wraps", "values":[65530,65535,0,5], "sessions":[1,1,1,1], "totals":{"1":65540}}
+]

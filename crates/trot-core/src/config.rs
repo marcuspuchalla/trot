@@ -11,6 +11,7 @@ static DEVICE_ID_FILE: OnceLock<PathBuf> = OnceLock::new();
 static DEVICES_FILE: OnceLock<PathBuf> = OnceLock::new();
 static DB_PATH: OnceLock<PathBuf> = OnceLock::new();
 static SNAPSHOT_PATH: OnceLock<PathBuf> = OnceLock::new();
+static FALLBACK_RECORDER_ID: OnceLock<String> = OnceLock::new();
 static SETTINGS_FILE: OnceLock<PathBuf> = OnceLock::new();
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -18,6 +19,8 @@ pub struct Device {
     pub id: String,
     pub name: String,
     pub last_seen: f64,
+    #[serde(default = "new_treadmill_id")]
+    pub treadmill_uid: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -80,6 +83,37 @@ pub struct AppSettings {
     /// (it defaults to the platform, e.g. "macOS"); shown as "Unknown" if blank.
     #[serde(default)]
     pub device_name: String,
+    /// Immutable installation identity. Never included in user-editable patches.
+    #[serde(default = "default_recorder_id")]
+    pub recorder_id: String,
+    /// Frozen migration label; only used for rows without recorder_id.
+    #[serde(default)]
+    pub legacy_device_name: Option<String>,
+    /// Fixed IANA reporting zone; travel does not silently move history.
+    #[serde(default = "default_reporting_timezone")]
+    pub reporting_timezone: String,
+}
+
+pub fn default_recorder_id() -> String {
+    FALLBACK_RECORDER_ID
+        .get_or_init(|| uuid::Uuid::new_v4().to_string())
+        .clone()
+}
+fn default_reporting_timezone() -> String {
+    iana_time_zone::get_timezone().unwrap_or_else(|_| "UTC".into())
+}
+pub fn recorder_id() -> String {
+    static ID: OnceLock<String> = OnceLock::new();
+    ID.get_or_init(|| load_settings().recorder_id).clone()
+}
+pub fn legacy_device_name() -> String {
+    static LABEL: OnceLock<String> = OnceLock::new();
+    LABEL
+        .get_or_init(|| {
+            let s = load_settings();
+            s.legacy_device_name.unwrap_or(s.device_name)
+        })
+        .clone()
 }
 
 fn default_locale() -> String {
@@ -96,6 +130,9 @@ impl Default for AppSettings {
             display_unit: default_unit(),
             setup_complete: false,
             device_name: String::new(),
+            recorder_id: default_recorder_id(),
+            legacy_device_name: Some(String::new()),
+            reporting_timezone: default_reporting_timezone(),
         }
     }
 }
@@ -108,7 +145,18 @@ pub fn device_name() -> String {
 pub fn load_settings() -> AppSettings {
     if let Some(path) = SETTINGS_FILE.get() {
         if let Ok(text) = std::fs::read_to_string(path) {
-            if let Ok(s) = serde_json::from_str::<AppSettings>(&text) {
+            if let Ok(mut s) = serde_json::from_str::<AppSettings>(&text) {
+                if s.legacy_device_name.is_none() {
+                    s.legacy_device_name = Some(s.device_name.clone());
+                }
+                // Persist additive defaults before returning them. Existing IDs
+                // are never regenerated merely because a label changes.
+                if !text.contains("\"recorder_id\"")
+                    || !text.contains("\"legacy_device_name\"")
+                    || !text.contains("\"reporting_timezone\"")
+                {
+                    save_settings(&s);
+                }
                 return s;
             }
         }
@@ -125,6 +173,7 @@ pub fn load_settings() -> AppSettings {
     if load_devices().active.is_some() {
         s.setup_complete = true;
     }
+    save_settings(&s);
     s
 }
 
@@ -168,10 +217,27 @@ fn now() -> f64 {
 
 // ---- devices store ---------------------------------------------------------
 
+fn new_treadmill_id() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+pub fn active_treadmill_uid() -> Option<String> {
+    let id = active_device_id()?;
+    Some(
+        load_devices()
+            .devices
+            .into_iter()
+            .find(|d| d.id == id)
+            .map(|d| d.treadmill_uid)
+            .unwrap_or_else(|| format!("{}/{id}", recorder_id())),
+    )
+}
 pub fn load_devices() -> DevicesConfig {
     if let Some(path) = DEVICES_FILE.get() {
         if let Ok(text) = std::fs::read_to_string(path) {
             if let Ok(cfg) = serde_json::from_str::<DevicesConfig>(&text) {
+                if !text.contains("treadmill_uid") {
+                    save_devices(&cfg);
+                }
                 return cfg;
             }
         }
@@ -187,6 +253,7 @@ pub fn load_devices() -> DevicesConfig {
                         id,
                         name: "Treadmill".into(),
                         last_seen: now(),
+                        treadmill_uid: new_treadmill_id(),
                     }],
                 };
                 save_devices(&cfg);
@@ -224,6 +291,7 @@ pub fn add_and_activate(id: &str, name: Option<&str>) -> DevicesConfig {
                 .unwrap_or("Treadmill")
                 .to_string(),
             last_seen: now(),
+            treadmill_uid: new_treadmill_id(),
         }),
     }
     cfg.active = Some(id.to_string());

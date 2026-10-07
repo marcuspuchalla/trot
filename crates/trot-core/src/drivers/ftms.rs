@@ -501,7 +501,30 @@ fn effective_state(speed_derived: Option<BeltState>, paused: bool) -> Option<Bel
 
 /// FTMS treadmills push Treadmill Data ~1 Hz; tolerate a quiet belt before
 /// treating the link as dead.
-const FTMS_IDLE_TIMEOUT: Duration = Duration::from_secs(15);
+/// A notification may carry only part of a measurement. Never turn absence
+/// into zero/stopped, or discard counters from the preceding notification.
+pub(crate) fn merge_sample(latest: &mut Sample, update: Sample) {
+    if update.speed_kmh.is_some() {
+        latest.speed_kmh = update.speed_kmh;
+    }
+    if update.distance_m.is_some() {
+        latest.distance_m = update.distance_m;
+    }
+    if update.steps.is_some() {
+        latest.steps = update.steps;
+    }
+    if update.duration_s.is_some() {
+        latest.duration_s = update.duration_s;
+    }
+    if update.calories.is_some() {
+        latest.calories = update.calories;
+    }
+    if update.state.is_some() {
+        latest.state = update.state;
+    }
+}
+
+const FTMS_IDLE_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// A belt reporting less than this is stopped: FTMS has no explicit status in
 /// Treadmill Data, so the running flag is derived from the speed itself.
@@ -617,6 +640,14 @@ impl Driver for Ftms {
                     if !link.is_connected().await.unwrap_or(false) {
                         return Err(anyhow!("FTMS link dropped; reconnecting"));
                     }
+                    // Re-emit a known stop so the ingestion debounce can finish
+                    // even when firmware sends only a single stop notification.
+                    if latest.state.is_some() && latest.state != Some(BeltState::Running) {
+                        emit(Sample {
+                            state: effective_state(latest.state, paused),
+                            ..latest.clone()
+                        });
+                    }
                     continue;
                 }
             };
@@ -634,6 +665,16 @@ impl Driver for Ftms {
                     continue; // no state claim (target changes etc.)
                 };
                 paused = pause;
+                if matches!(
+                    ev,
+                    MachineStatus::Reset
+                        | MachineStatus::StoppedByUser
+                        | MachineStatus::StoppedBySafetyKey
+                        | MachineStatus::PausedByUser
+                ) {
+                    latest.speed_kmh = Some(0.0);
+                    latest.state = Some(BeltState::Standby);
+                }
                 // Re-state the latest known reading under the new overlay —
                 // but only once there IS a reading; an all-None sample says
                 // nothing.
@@ -661,7 +702,7 @@ impl Driver for Ftms {
             if base.state == Some(BeltState::Running) {
                 paused = false; // the belt is factually moving; any pause ended
             }
-            latest = base;
+            merge_sample(&mut latest, base);
             emit(Sample {
                 state: effective_state(latest.state, paused),
                 ..latest.clone()
@@ -1262,5 +1303,31 @@ mod tests {
             crate::drivers::sig_uuid(0x2ada).to_string(),
             FITNESS_MACHINE_STATUS_UUID
         );
+    }
+}
+
+#[cfg(test)]
+mod partial_state_tests {
+    use super::*;
+    #[test]
+    fn split_measurement_keeps_state_and_counters() {
+        let mut state = Sample::default();
+        merge_sample(
+            &mut state,
+            to_sample(&parse_treadmill_data(&[0, 0, 44, 1]).unwrap()),
+        );
+        merge_sample(
+            &mut state,
+            to_sample(&parse_treadmill_data(&[5, 0, 100, 0, 0]).unwrap()),
+        );
+        assert_eq!(state.state, Some(BeltState::Running));
+        assert_eq!(state.speed_kmh, Some(3.));
+        assert_eq!(state.distance_m, Some(100.));
+        merge_sample(
+            &mut state,
+            to_sample(&parse_treadmill_data(&[0, 0, 0, 0]).unwrap()),
+        );
+        assert_eq!(state.state, Some(BeltState::Standby));
+        assert_eq!(state.distance_m, Some(100.));
     }
 }

@@ -310,7 +310,7 @@ impl AppState {
     }
 
     fn today_str() -> String {
-        Local::now().format("%Y-%m-%d").to_string()
+        crate::calendar::date(crate::db::now_ts())
     }
 
     fn avg_speed_payload(&self, local_date: &str) -> Value {
