@@ -85,6 +85,9 @@ pub static DRIVERS: &[&dyn Driver] = &[
 
 /// A treadmill protocol driver. In-tree, compiled in, reviewed — there is no
 /// dynamic loading, deliberately.
+// async_trait adds #[must_use] to its boxed Future; newer Clippy also
+// considers Future itself must-use. Keep this allowance on generated methods.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait Driver: Send + Sync {
     /// Short stable identifier ("lifespan", "ftms"). Shows up in logs.
