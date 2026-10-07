@@ -7,6 +7,7 @@
 pub mod api;
 pub mod app;
 pub mod ble;
+pub mod calendar;
 pub mod config;
 pub mod db;
 pub mod diagnostics;

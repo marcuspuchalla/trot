@@ -87,6 +87,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/steps/by-device", get(api_steps_by_device))
         .route("/api/timeofday", get(api_timeofday))
         .route("/api/sessions", get(api_sessions))
+        .route(
+            "/api/sessions/by-uid/:uid",
+            axum::routing::delete(api_session_delete),
+        )
         .route("/api/sessions/:id", get(api_session_detail))
         .route("/api/health", get(api_health))
         .route("/api/shutdown", post(api_shutdown))
@@ -282,7 +286,7 @@ async fn api_analytics(
         Some(r) => r,
         None => return (StatusCode::BAD_REQUEST, "bad resolution").into_response(),
     };
-    if p.range_days <= 0.0 || p.range_days > 365.0 * 5.0 {
+    if !p.range_days.is_finite() || p.range_days <= 0.0 || p.range_days > 365.0 * 5.0 {
         return (StatusCode::BAD_REQUEST, "range_days out of bounds").into_response();
     }
     // Bound the work: `range ÷ resolution` is the number of buckets SQLite has to
@@ -298,7 +302,19 @@ async fn api_analytics(
             .into_response();
     }
     let end_ts = crate::db::now_ts();
-    let start_ts = end_ts - p.range_days * 86400.0;
+    let start_ts = if res_s >= 86400 {
+        let today = chrono::NaiveDate::parse_from_str(
+            &crate::calendar::date(crate::db::now_ts()),
+            "%Y-%m-%d",
+        )
+        .expect("valid reporting date");
+        let first = (today - chrono::Duration::days(p.range_days.ceil() as i64 - 1))
+            .format("%Y-%m-%d")
+            .to_string();
+        crate::calendar::cutoff(&first, 0).unwrap_or(end_ts - p.range_days * 86400.0)
+    } else {
+        end_ts - p.range_days * 86400.0
+    };
     let raw = match s.db.timeseries(&p.metric, res_s, start_ts, end_ts) {
         Ok(r) => r,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
@@ -378,9 +394,14 @@ async fn api_steps_by_device(
     Query(p): Query<StepsByDeviceParams>,
 ) -> Response {
     let days = p.days.unwrap_or(30).clamp(1, 400);
-    let since = (chrono::Local::now().date_naive() - chrono::Duration::days(days - 1))
-        .format("%Y-%m-%d")
-        .to_string();
+    let since = (chrono::NaiveDate::parse_from_str(
+        &crate::calendar::date(crate::db::now_ts()),
+        "%Y-%m-%d",
+    )
+    .expect("valid reporting date")
+        - chrono::Duration::days(days - 1))
+    .format("%Y-%m-%d")
+    .to_string();
     match s.db.steps_by_device(&since) {
         Ok(rows) => {
             // These totals come from the per-minute rollups, so the current
@@ -691,6 +712,7 @@ struct SettingsPatch {
     display_unit: Option<String>,
     setup_complete: Option<bool>,
     device_name: Option<String>,
+    reporting_timezone: Option<String>,
 }
 
 /// First-run / preferences state (locale, unit, whether setup is done).
@@ -703,6 +725,8 @@ async fn api_settings_get(State(s): State<Arc<AppState>>) -> Json<Value> {
         "needs_setup": !st.setup_complete,
         "active_device": s.device_id(),
         "device_name": st.device_name,
+        "recorder_id": st.recorder_id, "legacy_device_name": st.legacy_device_name,
+        "reporting_timezone": st.reporting_timezone,
     }))
 }
 
@@ -740,6 +764,14 @@ async fn api_settings_set(
             .take(40)
             .collect();
     }
+    if let Some(tz) = p.reporting_timezone {
+        if crate::calendar::set_zone(&tz) {
+            st.reporting_timezone = tz;
+            s.invalidate_today();
+        } else {
+            return Json(json!({"ok":false,"error":"Unknown reporting timezone"}));
+        }
+    }
     crate::config::save_settings(&st);
     Json(json!({
         "ok": true,
@@ -747,6 +779,8 @@ async fn api_settings_set(
         "display_unit": st.display_unit,
         "setup_complete": st.setup_complete,
         "device_name": st.device_name,
+        "recorder_id": st.recorder_id, "legacy_device_name": st.legacy_device_name,
+        "reporting_timezone": st.reporting_timezone,
     }))
 }
 
@@ -826,7 +860,7 @@ struct DiagParams {
 async fn api_diag(State(s): State<Arc<AppState>>, Query(p): Query<DiagParams>) -> Response {
     let date = p
         .date
-        .unwrap_or_else(|| chrono::Local::now().format("%Y-%m-%d").to_string());
+        .unwrap_or_else(|| crate::calendar::date(crate::db::now_ts()));
     let mut diag = s.db.diag_day(&date).unwrap_or_else(|_| json!({}));
     if let Value::Object(ref mut m) = diag {
         m.insert("format".into(), json!("lifespan-sc110-diag"));
@@ -882,8 +916,12 @@ async fn api_import(
     Query(p): Query<ImportParams>,
     body: axum::body::Bytes,
 ) -> Response {
-    if p.mode != "merge" && p.mode != "replace" {
-        return (StatusCode::BAD_REQUEST, "mode must be 'merge' or 'replace'").into_response();
+    if p.mode != "merge" && p.mode != "sync" && p.mode != "replace" {
+        return (
+            StatusCode::BAD_REQUEST,
+            "mode must be 'merge', 'sync' or 'replace'",
+        )
+            .into_response();
     }
     let dump: Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
@@ -1028,5 +1066,18 @@ async fn diagnose_stop(
     match s.diagnostics.finish(&id, "client_finished") {
         Ok(()) => Json(json!({"ok":true})).into_response(),
         Err(e) => (StatusCode::NOT_FOUND, e.to_string()).into_response(),
+    }
+}
+
+async fn api_session_delete(
+    State(s): State<Arc<AppState>>,
+    axum::extract::Path(uid): axum::extract::Path<String>,
+) -> Response {
+    match s.db.delete_session(&uid) {
+        Ok(()) => {
+            s.invalidate_today();
+            Json(json!({"ok":true})).into_response()
+        }
+        Err(e) => (StatusCode::CONFLICT, e.to_string()).into_response(),
     }
 }

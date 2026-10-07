@@ -20,27 +20,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 const RECONNECT_DELAY: Duration = Duration::from_secs(5);
-/// Consecutive failed connect attempts (never reaching the treadmill) before the
-/// worker gives up and waits for a manual reconnect, instead of scanning forever.
-/// Each attempt scans up to ~10s, so this is roughly a minute of trying.
+/// Consecutive failed connect attempts before waiting for a manual reconnect.
 const MAX_CONNECT_ATTEMPTS: u32 = 6;
-/// How long a belt state (running / not running) must hold before it opens or
-/// closes a session.
-///
-/// A DURATION, deliberately not a frame count. Frame rate varies ~20× across
-/// drivers (LifeSpan answers a status opcode every ~0.5 s, FTMS pushes at
-/// 1 Hz, the props transport streams sub-second), so "two frames" meant
-/// anything from 100 ms to 2 s depending on the treadmill. Worse, a frame
-/// count amplifies a real failure shape: three drivers derive state from a
-/// speed threshold, and a belt sitting at that threshold can alternate
-/// running/not-running in PAIRS by chance — with a per-frame debounce each
-/// pair opened and closed a session every four frames, each cycle
-/// invalidating the today-cache and forcing a full `day_totals` de-glitch
-/// walk under the DB mutex (quadratic as the day grows; single-frame
-/// alternation was always harmless — only pairs fired). Requiring the state
-/// to HOLD for this long is uniform across the frame-rate spread and kills
-/// the pair-alternation path outright: an alternating state never holds.
-const SESSION_DEBOUNCE: Duration = Duration::from_secs(3);
 
 async fn first_adapter() -> Result<Adapter> {
     let manager = Manager::new().await?;
@@ -115,7 +96,7 @@ pub async fn scan(seconds: f64, all_devices: bool) -> Result<serde_json::Value> 
 pub async fn run(state: Arc<AppState>) {
     // Only our own — a follower must not stamp an end on a walk still running
     // on another device (see close_stale_active).
-    let mine = crate::config::device_name();
+    let mine = crate::config::legacy_device_name();
     if let Ok(closed) = state
         .db
         .close_stale_active("backend_restart", Some(mine.as_str()))
@@ -196,10 +177,11 @@ pub async fn run(state: Arc<AppState>) {
         let active = state.active_session();
         if let Some(sid) = active {
             let last = state.last_state();
-            persist_close(&state, sid, last.as_ref(), "ble_disconnect");
-            state.invalidate_today();
-            state.broadcast(json!({"type": "session_end", "id": sid}));
-            state.set_active_session(None);
+            if persist_close(&state, sid, last.as_ref(), "ble_disconnect") {
+                state.invalidate_today();
+                state.broadcast(json!({"type": "session_end", "id": sid}));
+                state.set_active_session(None);
+            }
         }
 
         tokio::select! {
@@ -459,7 +441,7 @@ const SAMPLE_MIN_INTERVAL_S: f64 = crate::db::SAMPLE_INTERVAL_S;
 // subscribe-time replay (a stack can deliver a queued burst in one
 // instant). Sizing: each allowance is small enough that a 10× unit-scale
 // error at walking pace exceeds `ceiling × dt + allowance` within
-// [`GATE_ANCHOR_WINDOW_S`] (so it IS caught), and large enough that every
+// the shared 60-second anchor window (so it IS caught), and large enough that every
 // legitimate stream in the pipeline test corpus passes with margin. The
 // per-field envelope re-anchors at most once per window — per-frame
 // re-anchoring would let a modest sustained over-rate slip under the
@@ -467,105 +449,40 @@ const SAMPLE_MIN_INTERVAL_S: f64 = crate::db::SAMPLE_INTERVAL_S;
 
 /// Steps ceiling: elite running cadence is ~5 steps/s; 8/s is beyond any
 /// treadmill gait.
-const GATE_MAX_STEPS_PER_S: f64 = 8.0;
+const GATE_MAX_STEPS_PER_S: f64 = trot_accounting::METRICS[0].1;
 /// Steps burst allowance. Strictly above db.rs's step spike threshold (50),
 /// so any single-frame glitch small enough for the de-glitcher to judge is
 /// never intercepted here.
-const GATE_STEPS_BURST: f64 = 60.0;
+const GATE_STEPS_BURST: f64 = trot_accounting::METRICS[0].2;
 /// Distance ceiling, in raw decameters/s: 1 raw/s = 10 m/s = 36 km/h,
 /// faster than any treadmill sold.
-const GATE_MAX_DISTANCE_RAW_PER_S: f64 = 1.0;
+const GATE_MAX_DISTANCE_RAW_PER_S: f64 = trot_accounting::METRICS[2].1;
 /// Distance burst allowance: 20 raw = 200 m, one decameter-quantised burst.
-const GATE_DISTANCE_RAW_BURST: f64 = 20.0;
+const GATE_DISTANCE_RAW_BURST: f64 = trot_accounting::METRICS[2].2;
 /// Duration ceiling: elapsed workout time cannot advance faster than the
 /// wall clock; 2× covers clock skew between console and host.
-const GATE_MAX_DURATION_PER_S: f64 = 2.0;
+const GATE_MAX_DURATION_PER_S: f64 = trot_accounting::METRICS[1].1;
 /// Duration burst allowance: subscribe-time replay can deliver minutes of
 /// backlog at once, and duration is the least corruptible field (its
 /// long-run rate is wall-clock-bounded), so the allowance is generous —
 /// a 10× duration mis-scale still exceeds the envelope within ~20 s.
-const GATE_DURATION_BURST: f64 = 150.0;
+const GATE_DURATION_BURST: f64 = trot_accounting::METRICS[1].2;
 /// Calories ceiling: 1 kcal/s = 3600 kcal/h, several times any walking
 /// workload.
-const GATE_MAX_CALORIES_PER_S: f64 = 1.0;
+const GATE_MAX_CALORIES_PER_S: f64 = trot_accounting::METRICS[3].1;
 /// Calories burst allowance: 60 kcal ≈ an hour of walking delivered as one
 /// coalesced burst; a 10× kcal mis-scale still trips within ~10 s.
-const GATE_CALORIES_BURST: f64 = 60.0;
+const GATE_CALORIES_BURST: f64 = trot_accounting::METRICS[3].2;
 /// Speed is a live reading, not a cumulative counter, so it takes the one
 /// absolute bound: 3000 centi-units = 30 km/h or 30 mph by console unit —
 /// beyond either interpretation of any under-desk belt.
 const GATE_MAX_SPEED_RAW: u32 = 3000;
-/// How long a field's envelope anchor holds before it may re-anchor to the
-/// current value. Long enough that a sustained over-rate must reveal itself
-/// against one anchor; short enough that the envelope tracks a real day.
-const GATE_ANCHOR_WINDOW_S: f64 = 60.0;
 /// Rate limit for the gate's WARN line (the counter in /api/diag is exact;
 /// the log is a hint, not a ledger).
 const GATE_WARN_INTERVAL_S: f64 = 30.0;
 
 /// Per-field envelope state for the plausibility gate.
-#[derive(Debug, Default, Clone)]
-struct FieldGate {
-    /// The envelope anchor: an accepted (value, ts). The allowed value at
-    /// `now` is `value + ceiling × (now − ts) + burst`.
-    anchor: Option<(u32, f64)>,
-    /// A deep decrease (value fell below half the anchor) seen on the
-    /// previous field-bearing sample: EITHER a genuine counter reset OR a
-    /// one-frame stale-low read — a causal gate cannot tell which, so the
-    /// judgement is DEFERRED one frame, mirroring `deglitch_walk`'s
-    /// lookahead: if the next value continues the low series, the drop was
-    /// a reset and the anchor adopts it; if the next value is back inside
-    /// the old envelope, the dip was a stale frame and the old anchor
-    /// stands. Without this, one stale-low read would wedge the anchor and
-    /// reject minutes of good samples — exactly the bad interaction with
-    /// the de-glitcher this comment exists to prevent.
-    pending_reset: Option<(u32, f64)>,
-}
-
-impl FieldGate {
-    /// Admit or refuse `v` at `now`. Refusal means "strip the field from
-    /// this sample"; the anchor is left untouched so a genuinely absurd
-    /// stream stays refused (and counted) instead of ratcheting the
-    /// envelope up.
-    fn admit(&mut self, v: u32, now: f64, ceiling: f64, burst: f64) -> bool {
-        let Some((mut av, mut ats)) = self.anchor else {
-            // First reading of this connection: the baseline. The stored
-            // layer judges stale-high openers (`deglitch_walk`); the gate
-            // has no context to.
-            self.anchor = Some((v, now));
-            return true;
-        };
-        if let Some((pv, pts)) = self.pending_reset.take() {
-            // One deferred frame after a deep drop (see the field's doc):
-            // does `v` continue the low series?
-            if (v as f64) <= pv as f64 + ceiling * (now - pts) + burst {
-                // Yes — the drop was a real reset. Adopt it as the anchor.
-                self.anchor = Some((pv, pts));
-                (av, ats) = (pv, pts);
-            }
-            // No — the dip was a one-frame stale read; the old anchor stands
-            // and `v` is judged against it below.
-        }
-        let allowed = av as f64 + ceiling * (now - ats) + burst;
-        if v as f64 > allowed {
-            return false;
-        }
-        if v < av {
-            // Decreases ALWAYS pass (resets are the storage layer's to
-            // judge); a deep one starts the one-frame reset deferral.
-            if (v as u64) * 2 < av as u64 {
-                self.pending_reset = Some((v, now));
-            }
-        } else if v == av {
-            // Idle counter: keep the envelope tight — without this, an idle
-            // hour would grow `allowed` by ceiling × 3600 and blind the gate.
-            self.anchor = Some((v, now));
-        } else if now - ats >= GATE_ANCHOR_WINDOW_S {
-            self.anchor = Some((v, now));
-        }
-        true
-    }
-}
+use trot_accounting::FieldGate;
 
 /// Per-connection plausibility-gate state, part of [`IngestState`].
 #[derive(Debug, Default)]
@@ -588,7 +505,7 @@ fn gate_telemetry(telem: &Telemetry, now: f64, gate: &mut GateState) -> (Telemet
     let mut counter =
         |field: &mut FieldGate, name: &str, value: Option<u32>, ceiling: f64, burst: f64| -> bool {
             let Some(v) = value else { return true };
-            let anchor = field.anchor;
+            let anchor = field.anchor();
             if field.admit(v, now, ceiling, burst) {
                 return true;
             }
@@ -663,7 +580,7 @@ pub(crate) struct IngestState {
     /// Session-debounce state: the `is_running` value the stream is
     /// currently holding and when it started holding it — a session opens
     /// (closes) only once `is_running` has held true (false) for
-    /// [`SESSION_DEBOUNCE`], regardless of how many frames arrived between.
+    /// [`trot_accounting::SESSION_DEBOUNCE_S`], regardless of how many frames arrived between.
     pub(crate) run_held: Option<(bool, f64)>,
     pub(crate) last_persist: f64,
 }
@@ -710,6 +627,18 @@ pub(crate) fn ingest_sample(
         &mut ing.run_held,
         &mut ing.last_persist,
     );
+    if let Some(sid) = state.active_session() {
+        match state.db.split_at_midnight(sid, now) {
+            Ok(Some(next)) => {
+                state.set_active_session(Some(next));
+                state.invalidate_today();
+                state.broadcast(json!({"type":"session_end","id":sid}));
+                state.broadcast(json!({"type":"session_start","id":next}));
+            }
+            Ok(None) => {}
+            Err(e) => tracing::warn!("midnight split failed: {e}"),
+        }
+    }
     state.set_last_state(Some(telem.clone()));
 
     // The persistence throttle needs to know whether this telemetry
@@ -722,14 +651,7 @@ pub(crate) fn ingest_sample(
     // Session debounce, by TIME held, not frames seen (see SESSION_DEBOUNCE):
     // any flip of is_running restarts the clock, so an alternating stream
     // never confirms anything.
-    let held_s = match *run_held {
-        Some((running, since)) if running == telem.is_running => now - since,
-        _ => {
-            *run_held = Some((telem.is_running, now));
-            0.0
-        }
-    };
-    let confirmed = held_s >= SESSION_DEBOUNCE.as_secs_f64();
+    let confirmed = trot_accounting::held(run_held, telem.is_running, now);
     let active = state.active_session();
 
     if confirmed && telem.is_running && active.is_none() {
@@ -748,6 +670,10 @@ pub(crate) fn ingest_sample(
             state.invalidate_today();
             state.broadcast(json!({"type": "session_start", "id": sid}));
             tracing::info!("session {sid} started (start_steps={:?})", telem.steps);
+        } else {
+            state.broadcast(
+                json!({"type":"storage_error","error":"Could not save the new recording"}),
+            );
         }
     } else if confirmed && !telem.is_running && active.is_some() {
         let sid = active.unwrap();
@@ -755,11 +681,12 @@ pub(crate) fn ingest_sample(
             .status_name
             .clone()
             .unwrap_or_else(|| "stopped".into());
-        persist_close(state, sid, Some(&telem), &reason);
-        state.invalidate_today();
-        tracing::info!("session {sid} closed");
-        state.broadcast(json!({"type": "session_end", "id": sid}));
-        state.set_active_session(None);
+        if persist_close(state, sid, Some(&telem), &reason) {
+            state.invalidate_today();
+            tracing::info!("session {sid} closed");
+            state.broadcast(json!({"type": "session_end", "id": sid}));
+            state.set_active_session(None);
+        }
     }
 
     // Persist at most one row per SAMPLE_MIN_INTERVAL_S. A status change is always
@@ -780,6 +707,7 @@ pub(crate) fn ingest_sample(
             telem.calories,
             telem.speed_raw,
         ) {
+            state.broadcast(json!({"type":"storage_error","error":e.to_string()}));
             tracing::warn!("could not update session {sid}: {e}");
         }
     }
@@ -797,13 +725,14 @@ pub(crate) fn ingest_sample(
         telem.calories,
         telem.status,
     ) {
+        state.broadcast(json!({"type":"storage_error","error":e.to_string()}));
         tracing::warn!("could not persist sample: {e}");
     }
     telem
 }
 
-fn persist_close(state: &Arc<AppState>, sid: i64, telem: Option<&Telemetry>, reason: &str) {
-    let _ = state.db.close_session(
+fn persist_close(state: &Arc<AppState>, sid: i64, telem: Option<&Telemetry>, reason: &str) -> bool {
+    if let Err(e) = state.db.close_session(
         sid,
         unix_now(),
         telem.and_then(|t| t.steps),
@@ -812,7 +741,12 @@ fn persist_close(state: &Arc<AppState>, sid: i64, telem: Option<&Telemetry>, rea
         telem.and_then(|t| t.calories),
         telem.and_then(|t| t.speed_raw),
         reason,
-    );
+    ) {
+        state.broadcast(json!({"type":"storage_error","error":e.to_string()}));
+        false
+    } else {
+        true
+    }
 }
 
 #[cfg(test)]

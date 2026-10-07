@@ -54,6 +54,7 @@ CREATE TABLE IF NOT EXISTS samples (
     FOREIGN KEY (session_id) REFERENCES sessions(id)
 );
 CREATE INDEX IF NOT EXISTS idx_samples_session ON samples(session_id);
+CREATE INDEX IF NOT EXISTS idx_samples_session_ts ON samples(session_id,ts);
 CREATE INDEX IF NOT EXISTS idx_samples_ts ON samples(ts);
 
 CREATE TABLE IF NOT EXISTS sample_rollups_1m (
@@ -137,13 +138,7 @@ pub fn now_ts() -> f64 {
 }
 
 fn local_date(ts: f64) -> String {
-    // chrono local time, matching Python datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
-    use chrono::{Local, TimeZone};
-    Local
-        .timestamp_opt(ts as i64, 0)
-        .single()
-        .map(|d| d.format("%Y-%m-%d").to_string())
-        .unwrap_or_default()
+    crate::calendar::date(ts)
 }
 
 /// De-glitched cumulative total over the SC110's noisy free-running odometer.
@@ -170,56 +165,8 @@ fn local_date(ts: f64) -> String {
 /// `deglitch_tail`, which applies the same rules from the rollup floor up;
 /// this stays as the executable statement of those rules.
 #[cfg(test)]
-fn deglitch_walk(values: &[i64], spike: i64, reset_max: i64, mut emit: impl FnMut(usize, i64)) {
-    let n = values.len();
-    let mut prev: Option<i64> = None;
-    for i in 0..n {
-        let v = values[i];
-        // Drop an isolated outlier: far from both neighbours in the same
-        // direction (spikes up or down that immediately revert).
-        if i > 0 && i + 1 < n {
-            let p = values[i - 1];
-            let nx = values[i + 1];
-            let spike_up = v - p > spike && v - nx > spike;
-            let spike_down = p - v > spike && nx - v > spike;
-            if spike_up || spike_down {
-                continue;
-            }
-        }
-        match prev {
-            None => {
-                // Drop a stale-HIGH opening frame the next sample contradicts by
-                // more than `spike`: the interior spike rule needs both neighbours,
-                // but the first sample has only the forward one, so a garbage
-                // opening reading (e.g. 5000 before a real 1800) would otherwise be
-                // counted as baseline steps. Leave `prev` unset so the next sample
-                // becomes the baseline instead.
-                if i + 1 < n && v - values[i + 1] > spike {
-                    continue;
-                }
-                // First accepted reading already reflects steps walked today.
-                let base = v.max(0);
-                if base > 0 {
-                    emit(i, base);
-                }
-                prev = Some(v);
-            }
-            Some(pv) => {
-                let d = v - pv;
-                if d > 0 {
-                    emit(i, d);
-                    prev = Some(v);
-                } else if d < 0 && (v <= reset_max || v * 2 < pv) {
-                    // Genuine counter reset: dropped to ~0, OR fell by more than
-                    // half — the SC110 zeroes its step counter between sessions and
-                    // we often catch it after it has already climbed a little
-                    // (e.g. 488 -> 42). The post-reset climb is counted from here.
-                    prev = Some(v);
-                }
-                // else: shallow non-reset dip — keep prev, add nothing.
-            }
-        }
-    }
+fn deglitch_walk(values: &[i64], spike: i64, reset_max: i64, emit: impl FnMut(usize, i64)) {
+    trot_accounting::increments(values, spike, reset_max, None, emit);
 }
 
 /// De-glitched cumulative total — sum of every accepted increment.
@@ -228,67 +175,6 @@ fn deglitch_total(values: &[i64], spike: i64, reset_max: i64) -> i64 {
     let mut total: i64 = 0;
     deglitch_walk(values, spike, reset_max, |_, d| total += d);
     total
-}
-
-/// De-glitched increments per (bucket_ts, session_id) for the rollup writer.
-/// Walks the continuous cross-session stream (samples must be ordered by ts,id
-/// with NULLs pre-filtered) so a stale frame at a session boundary still has
-/// neighbour context. Increments only — the starting baseline is not a "step
-/// added", matching the analytics range semantics.
-fn deglitch_bucketed(
-    samples: &[(i64, i64, i64)], // (ts, session_id, value)
-    resolution_s: i64,
-    spike: i64,
-    reset_max: i64,
-    // Last accepted value before this window, at ANY age. Without it the walk
-    // restarts blind after a sample gap longer than the lookback and the
-    // increment accrued across that gap is never banked.
-    seed: Option<i64>,
-) -> std::collections::HashMap<(i64, i64), i64> {
-    let n = samples.len();
-    let mut out: std::collections::HashMap<(i64, i64), i64> = std::collections::HashMap::new();
-    let mut prev: Option<i64> = seed;
-    for i in 0..n {
-        let (ts, sess, v) = samples[i];
-        if i > 0 && i + 1 < n {
-            let p = samples[i - 1].2;
-            let nx = samples[i + 1].2;
-            if (v - p > spike && v - nx > spike) || (p - v > spike && nx - v > spike) {
-                continue;
-            }
-        }
-        match prev {
-            None => {
-                // No prior context anywhere: this reading is steps ALREADY
-                // walked (the belt was moving before the app connected), so it
-                // is a baseline that must be banked — `deglitch_walk` banks it,
-                // and if the rollups do not, the day total silently shrinks by
-                // the pre-connect walk as soon as the rollup loop runs, then
-                // becomes unrecoverable once raw is pruned.
-                // Same stale-HIGH opening guard as deglitch_walk.
-                if i + 1 < n && v - samples[i + 1].2 > spike {
-                    continue;
-                }
-                let base = v.max(0);
-                if base > 0 {
-                    let bucket = (ts / resolution_s) * resolution_s;
-                    *out.entry((bucket, sess)).or_insert(0) += base;
-                }
-                prev = Some(v);
-            }
-            Some(pv) => {
-                let d = v - pv;
-                if d > 0 {
-                    let bucket = (ts / resolution_s) * resolution_s;
-                    *out.entry((bucket, sess)).or_insert(0) += d;
-                    prev = Some(v);
-                } else if d < 0 && (v <= reset_max || v * 2 < pv) {
-                    prev = Some(v); // reset to ~0 or a drop of more than half
-                }
-            }
-        }
-    }
-    out
 }
 
 /// De-glitched increments for the *un-rolled raw tail* of a day.
@@ -308,85 +194,25 @@ fn deglitch_bucketed(
 /// When `floor == 0` (nothing rolled yet) every sample counts *including* the
 /// first-reading baseline, so this degrades exactly to the historical
 /// `deglitch_total` over the full day — preserving pre-rollup numbers.
+#[cfg(test)]
 fn deglitch_tail(
-    samples: &[(f64, i64)], // (ts, value) ordered by ts
+    samples: &[(f64, i64)],
     floor: f64,
     spike: i64,
     reset_max: i64,
     mut emit: impl FnMut(usize, i64),
 ) {
-    let n = samples.len();
-    let mut prev: Option<i64> = None;
-    for i in 0..n {
-        let (ts, v) = samples[i];
-        if i > 0 && i + 1 < n {
-            let p = samples[i - 1].1;
-            let nx = samples[i + 1].1;
-            if (v - p > spike && v - nx > spike) || (p - v > spike && nx - v > spike) {
-                continue;
-            }
+    let values: Vec<_> = samples.iter().map(|s| s.1).collect();
+    trot_accounting::increments(&values, spike, reset_max, None, |i, delta| {
+        if samples[i].0 >= floor {
+            emit(i, delta);
         }
-        let counts = ts >= floor;
-        match prev {
-            None => {
-                // Drop a stale-HIGH opening frame (see `deglitch_walk`): a garbage
-                // first reading must not become a baseline. The next sample becomes
-                // the baseline instead.
-                if i + 1 < n && v - samples[i + 1].1 > spike {
-                    continue;
-                }
-                let base = v.max(0);
-                if base > 0 && counts {
-                    emit(i, base);
-                }
-                prev = Some(v);
-            }
-            Some(pv) => {
-                let d = v - pv;
-                if d > 0 {
-                    if counts {
-                        emit(i, d);
-                    }
-                    prev = Some(v);
-                } else if d < 0 && (v <= reset_max || v * 2 < pv) {
-                    prev = Some(v);
-                }
-            }
-        }
-    }
-}
-
-/// Sum of `deglitch_tail`'s counted increments.
-fn deglitch_tail_total(samples: &[(f64, i64)], floor: f64, spike: i64, reset_max: i64) -> i64 {
-    let mut total = 0i64;
-    deglitch_tail(samples, floor, spike, reset_max, |_, d| total += d);
-    total
-}
-
-/// The rollup floor (`last_rolled_ts`): raw samples below it are already
-/// captured in `sample_rollups_1m`, so day/hour/timeseries reads must not
-/// double-count them. 0 when nothing has been rolled.
-fn raw_floor(c: &Connection) -> f64 {
-    c.query_row(
-        "SELECT last_rolled_ts FROM rollup_state WHERE kind=?",
-        params![ROLLUP_KIND],
-        |r| r.get(0),
-    )
-    .optional()
-    .ok()
-    .flatten()
-    .unwrap_or(0.0)
+    });
 }
 
 /// Local hour (0..23) of a unix timestamp.
 fn local_hour(ts: f64) -> usize {
-    use chrono::{Local, TimeZone, Timelike};
-    Local
-        .timestamp_opt(ts as i64, 0)
-        .single()
-        .map(|d| d.hour() as usize)
-        .unwrap_or(0)
-        .min(23)
+    crate::calendar::hour(ts)
 }
 
 #[cfg(test)]
@@ -407,7 +233,30 @@ fn this_device() -> String {
     if let Some(n) = TEST_DEVICE_NAME.with(|c| c.borrow().clone()) {
         return n;
     }
-    crate::config::device_name()
+    crate::config::legacy_device_name()
+}
+
+fn this_recorder() -> String {
+    #[cfg(test)]
+    if let Some(n) = TEST_DEVICE_NAME.with(|c| c.borrow().clone()) {
+        return format!("test-recorder:{n}");
+    }
+    crate::config::recorder_id()
+}
+fn recorded_here(recorder: Option<&str>, source: Option<&str>, legacy: &str) -> bool {
+    match recorder {
+        Some(id) => id == this_recorder(),
+        None => source.is_none_or(|s| s == legacy),
+    }
+}
+fn legacy_uid(source: &str, ts: f64) -> String {
+    format!("legacy:{}:{}:{}", source.len(), source, ts)
+}
+fn import_identity(c: &Connection, s: &Value, sid: i64, uid: &str) -> Result<()> {
+    c.execute("UPDATE sessions SET session_uid=?,recorder_id=?,treadmill_id=?,reporting_timezone=?,revision=?,updated_at=?,received_at=?,continuation_uid=?,counter_seed=? WHERE id=?",
+        params![uid,s["recorder_id"].as_str(),s["treadmill_id"].as_str(),s["reporting_timezone"].as_str(),
+        s["revision"].as_i64().unwrap_or(0),s["updated_at"].as_f64(),now_ts(),s["continuation_uid"].as_str(),s["counter_seed"].as_str(),sid])?;
+    Ok(())
 }
 
 /// Act as `name` for the rest of this test thread.
@@ -429,113 +278,152 @@ pub struct SessionTotals {
     pub calories: i64,
 }
 
-/// The de-glitch parameters per metric: (spike, reset_max). Kept in one place so
-/// a session total and a day total can never be computed with different ones.
-const SPIKE_STEPS: (i64, i64) = (50, 10);
-const SPIKE_DURATION: (i64, i64) = (600, 10);
-const SPIKE_CALORIES: (i64, i64) = (100, 10);
-const SPIKE_DISTANCE: (i64, i64) = (200, 10);
-
-/// De-glitched per-session totals for one local date, for the sessions this
-/// device actually recorded.
-///
-/// The walk stays DAY-WIDE and each accepted increment is attributed to the
-/// session that owns its sample. It cannot be split into independent per-session
-/// walks: the treadmill console counts across sessions (a day might run 30→113,
-/// then 120→150), so the day's opening value is banked once, by the first
-/// session, and every later session is worth only what it added on top. Walking
-/// each session from scratch re-banks its opening reading and inflates the day
-/// by roughly one session total per session.
-///
-/// By construction the returned values sum to exactly what a day-wide total
-/// would be — which is what lets a peer add them up and reach the same number.
-/// A session absent from the map is one this device holds no data for.
-fn day_session_totals(
-    c: &Connection,
-    local_date_s: &str,
-) -> Result<std::collections::HashMap<i64, SessionTotals>> {
-    use std::collections::HashMap;
-    let floor = raw_floor(c);
-    let mut acc: HashMap<i64, SessionTotals> = HashMap::new();
-
-    // Tier 1: deltas already banked in the per-minute rollups, per session.
-    {
-        let mut stmt = c.prepare(
-            "SELECT r.session_id,
-                    COALESCE(SUM(r.steps_delta),0), COALESCE(SUM(r.duration_s_delta),0),
-                    COALESCE(SUM(r.distance_raw_delta),0), COALESCE(SUM(r.calories_delta),0)
-             FROM sample_rollups_1m r JOIN sessions se ON se.id = r.session_id
-             WHERE se.local_date = ? AND r.bucket_ts < ?
-             GROUP BY r.session_id",
-        )?;
-        let mut q = stmt.query(params![local_date_s, floor as i64])?;
-        while let Some(r) = q.next()? {
-            acc.insert(
-                r.get(0)?,
-                SessionTotals {
-                    steps: r.get(1)?,
-                    duration_s: r.get(2)?,
-                    distance_raw: r.get(3)?,
-                    calories: r.get(4)?,
-                },
+/// Minutes already represented by durable rollups, keyed by session.
+fn rolled_minutes(c: &Connection, date: &str) -> Result<std::collections::HashSet<(i64, i64)>> {
+    let mut stmt=c.prepare("SELECT r.bucket_ts,r.session_id FROM sample_rollups_1m r JOIN sessions se ON se.id=r.session_id WHERE se.local_date=?")?;
+    let rows = stmt
+        .query_map(params![date], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(rows)
+}
+// Canonical raw increments, partitioned by physical recording stream and day.
+// The seed on a midnight continuation is context, never a new day's credit.
+fn raw_day_points(c: &Connection, date: &str) -> Result<Vec<(f64, i64, [i64; 4])>> {
+    use std::collections::BTreeMap;
+    type CounterPoint = (f64, i64, [Option<i64>; 4]);
+    let mut streams: BTreeMap<String, Vec<CounterPoint>> = BTreeMap::new();
+    let mut seeds: BTreeMap<String, Option<Value>> = BTreeMap::new();
+    let mut sessions=c.prepare("SELECT id,COALESCE(treadmill_id,'legacy'),counter_seed FROM sessions WHERE local_date=? AND received_at IS NULL AND is_local(recorder_id,source,?) ORDER BY started_ts,id")?;
+    let mut q = sessions.query(params![date, this_device()])?;
+    let mut keys = std::collections::HashMap::new();
+    while let Some(r) = q.next()? {
+        let key: String = r.get(1)?;
+        keys.insert(r.get::<_, i64>(0)?, key.clone());
+        seeds.entry(key).or_insert_with(|| {
+            r.get::<_, Option<String>>(2)
+                .ok()
+                .flatten()
+                .and_then(|v| serde_json::from_str(&v).ok())
+        });
+    }
+    let mut stmt=c.prepare("SELECT s.ts,s.session_id,s.steps,s.duration_s,s.distance_raw,s.calories FROM samples s JOIN sessions se ON se.id=s.session_id WHERE se.local_date=? AND se.received_at IS NULL AND is_local(se.recorder_id,se.source,?) ORDER BY s.ts,s.id")?;
+    let mut q = stmt.query(params![date, this_device()])?;
+    while let Some(r) = q.next()? {
+        let sid: i64 = r.get(1)?;
+        streams.entry(keys[&sid].clone()).or_default().push((
+            r.get(0)?,
+            sid,
+            [r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?],
+        ));
+    }
+    let mut out = Vec::new();
+    for (key, rows) in streams {
+        let mut points: Vec<_> = rows.iter().map(|r| (r.0, r.1, [0i64; 4])).collect();
+        for (metric, field) in ["steps", "duration_s", "distance_raw", "calories"]
+            .iter()
+            .enumerate()
+        {
+            let indices: Vec<_> = rows
+                .iter()
+                .enumerate()
+                .filter_map(|(i, r)| r.2[metric].map(|v| (i, v)))
+                .collect();
+            let values: Vec<_> = indices.iter().map(|r| r.1).collect();
+            let seed = seeds[&key].as_ref().and_then(|s| s[*field].as_i64());
+            trot_accounting::increments(
+                &values,
+                trot_accounting::METRICS[metric].0,
+                10,
+                seed,
+                |i, d| points[indices[i].0].2[metric] += d,
             );
         }
+        out.extend(points);
     }
-
-    // Tier 0: the raw tail at/above the floor, walked once per metric across the
-    // whole day so continuity between sessions is preserved.
-    let mut steps_v: Vec<(f64, i64)> = Vec::new();
-    let mut dur_v: Vec<(f64, i64)> = Vec::new();
-    let mut dist_v: Vec<(f64, i64)> = Vec::new();
-    let mut cal_v: Vec<(f64, i64)> = Vec::new();
-    let (mut steps_sid, mut dur_sid, mut dist_sid, mut cal_sid) =
-        (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-    {
-        let mut stmt = c.prepare(
-            "SELECT s.ts, s.session_id, s.steps, s.duration_s, s.distance_raw, s.calories
-             FROM samples s JOIN sessions se ON se.id = s.session_id
-             WHERE se.local_date = ? ORDER BY s.ts, s.id",
-        )?;
-        let mut q = stmt.query(params![local_date_s])?;
-        while let Some(r) = q.next()? {
-            let ts: f64 = r.get(0)?;
-            let Some(sid) = r.get::<_, Option<i64>>(1)? else {
-                continue;
-            };
-            acc.entry(sid).or_default();
-            if let Some(x) = r.get::<_, Option<i64>>(2)? {
-                steps_v.push((ts, x));
-                steps_sid.push(sid);
-            }
-            if let Some(x) = r.get::<_, Option<i64>>(3)? {
-                dur_v.push((ts, x));
-                dur_sid.push(sid);
-            }
-            if let Some(x) = r.get::<_, Option<i64>>(4)? {
-                dist_v.push((ts, x));
-                dist_sid.push(sid);
-            }
-            if let Some(x) = r.get::<_, Option<i64>>(5)? {
-                cal_v.push((ts, x));
-                cal_sid.push(sid);
-            }
+    out.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+    Ok(out)
+}
+fn day_session_totals(
+    c: &Connection,
+    date: &str,
+) -> Result<std::collections::HashMap<i64, SessionTotals>> {
+    let rolled = rolled_minutes(c, date)?;
+    let mut acc = std::collections::HashMap::<i64, SessionTotals>::new();
+    let mut stmt=c.prepare("SELECT r.session_id,SUM(r.steps_delta),SUM(r.duration_s_delta),SUM(r.distance_raw_delta),SUM(r.calories_delta) FROM sample_rollups_1m r JOIN sessions se ON se.id=r.session_id WHERE se.local_date=? AND se.received_at IS NULL AND is_local(se.recorder_id,se.source,?) GROUP BY r.session_id")?;
+    let mut q = stmt.query(params![date, this_device()])?;
+    while let Some(r) = q.next()? {
+        acc.insert(
+            r.get(0)?,
+            SessionTotals {
+                steps: r.get(1)?,
+                duration_s: r.get(2)?,
+                distance_raw: r.get(3)?,
+                calories: r.get(4)?,
+            },
+        );
+    }
+    for (ts, sid, d) in raw_day_points(c, date)? {
+        let t = acc.entry(sid).or_default();
+        if !rolled.contains(&((ts as i64).div_euclid(60) * 60, sid)) {
+            t.steps += d[0];
+            t.duration_s += d[1];
+            t.distance_raw += d[2];
+            t.calories += d[3];
         }
     }
-
-    let mut walk = |vals: &[(f64, i64)],
-                    sids: &[i64],
-                    spike: (i64, i64),
-                    pick: fn(&mut SessionTotals) -> &mut i64| {
-        deglitch_tail(vals, floor, spike.0, spike.1, |i, d| {
-            *pick(acc.entry(sids[i]).or_default()) += d;
-        });
-    };
-    walk(&steps_v, &steps_sid, SPIKE_STEPS, |t| &mut t.steps);
-    walk(&dur_v, &dur_sid, SPIKE_DURATION, |t| &mut t.duration_s);
-    walk(&dist_v, &dist_sid, SPIKE_DISTANCE, |t| &mut t.distance_raw);
-    walk(&cal_v, &cal_sid, SPIKE_CALORIES, |t| &mut t.calories);
-
     Ok(acc)
+}
+// Foreign raw tails are incomplete. Preserve their recorder's verdict, using
+// rollups for distribution and placing any unrolled remainder at the last
+// observation. That remainder's placement is approximate, its total is exact.
+fn day_chart_points(c: &Connection, date: &str) -> Result<Vec<(f64, i64, [i64; 4])>> {
+    let rolled = rolled_minutes(c, date)?;
+    let mut out = Vec::new();
+    let mut sums = std::collections::HashMap::<i64, [i64; 4]>::new();
+    let mut stmt=c.prepare("SELECT r.bucket_ts,r.session_id,r.steps_delta,r.duration_s_delta,r.distance_raw_delta,r.calories_delta FROM sample_rollups_1m r JOIN sessions se ON se.id=r.session_id WHERE se.local_date=? ORDER BY r.bucket_ts")?;
+    let mut q = stmt.query(params![date])?;
+    while let Some(r) = q.next()? {
+        let sid: i64 = r.get(1)?;
+        let d: [i64; 4] = [r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?];
+        let total = sums.entry(sid).or_default();
+        for i in 0..4 {
+            total[i] += d[i];
+        }
+        out.push((r.get(0)?, sid, d));
+    }
+    out.extend(
+        raw_day_points(c, date)?
+            .into_iter()
+            .filter(|p| !rolled.contains(&((p.0 as i64).div_euclid(60) * 60, p.1))),
+    );
+    let mut stmt=c.prepare("SELECT id,COALESCE(ended_ts,updated_at,started_ts),steps_total,duration_s_total,distance_raw_total,calories_total,steps_end,start_steps,duration_s_end,start_duration_s,distance_raw_end,calories_end FROM sessions WHERE local_date=? AND (received_at IS NOT NULL OR NOT is_local(recorder_id,source,?) OR (NOT EXISTS(SELECT 1 FROM samples WHERE session_id=sessions.id) AND NOT EXISTS(SELECT 1 FROM sample_rollups_1m WHERE session_id=sessions.id)))")?;
+    let mut q = stmt.query(params![date, this_device()])?;
+    while let Some(r) = q.next()? {
+        let sid: i64 = r.get(0)?;
+        let mut d = [0; 4];
+        for i in 0..4 {
+            let bank: Option<i64> = r.get(2 + i)?;
+            let end: Option<i64> = r.get([6, 8, 10, 11][i])?;
+            let start: Option<i64> = if i < 2 { r.get([7, 9][i])? } else { None };
+            let total = bank.unwrap_or_else(|| session_totals_from_endpoints(end, start));
+            let rolled = sums.get(&sid).map(|s| s[i]).unwrap_or(0);
+            d[i] = (total - rolled).max(0);
+            let mut excess = (rolled - total.max(0)).max(0);
+            for point in out.iter_mut().rev().filter(|p| p.1 == sid) {
+                let take = point.2[i].min(excess);
+                point.2[i] -= take;
+                excess -= take;
+                if excess == 0 {
+                    break;
+                }
+            }
+        }
+        let ts: f64 = r.get(1)?;
+        let start = crate::calendar::cutoff(date, 0).unwrap_or(ts);
+        let end = crate::calendar::cutoff(date, 86400).unwrap_or(ts + 1.0);
+        out.push((ts.max(start).min(end - 0.001), sid, d));
+    }
+    Ok(out)
 }
 
 /// Last-resort total for a session this device never recorded and whose recorder
@@ -567,19 +455,13 @@ fn bank_session_totals(c: &Connection, sid: i64) -> Result<()> {
     // Only the recording device may write a verdict. Without this a follower
     // banked its own partial recomputation over the walker's total and then
     // published it to the shared account blob.
-    let source: Option<String> = c
-        .query_row(
-            "SELECT source FROM sessions WHERE id = ?",
-            params![sid],
-            |r| r.get(0),
-        )
-        .optional()?
-        .flatten();
-    let mine = this_device();
-    if let Some(src) = source.as_deref() {
-        if src != mine {
-            return Ok(());
-        }
+    let own: bool = c.query_row(
+        "SELECT (received_at IS NULL AND is_local(recorder_id,source,?)) FROM sessions WHERE id=?",
+        params![this_device(), sid],
+        |r| r.get(0),
+    )?;
+    if !own {
+        return Ok(());
     }
     let totals = day_session_totals(c, &date)?;
     let Some(t) = totals.get(&sid).copied() else {
@@ -608,7 +490,7 @@ fn write_banked_totals(c: &Connection, sid: i64, t: SessionTotals) -> Result<()>
         return Ok(()); // already banked and unchanged — skip the write
     }
     c.execute(
-        "UPDATE sessions SET steps_total = ?, duration_s_total = ?,
+        "UPDATE sessions SET revision=revision+1,updated_at=unixepoch(), steps_total = ?, duration_s_total = ?,
              distance_raw_total = ?, calories_total = ? WHERE id = ?",
         params![t.steps, t.duration_s, t.distance_raw, t.calories, sid],
     )?;
@@ -619,13 +501,7 @@ fn write_banked_totals(c: &Connection, sid: i64, t: SessionTotals) -> Result<()>
 /// same local timezone the rest of the engine derives `local_date` in. `None`
 /// if the string doesn't parse (or the wall-clock is ambiguous, e.g. a DST gap).
 fn local_midnight(date: &str) -> Option<f64> {
-    use chrono::{Local, NaiveDate, TimeZone};
-    let d = NaiveDate::parse_from_str(date, "%Y-%m-%d").ok()?;
-    let naive = d.and_hms_opt(0, 0, 0)?;
-    Local
-        .from_local_datetime(&naive)
-        .single()
-        .map(|dt| dt.timestamp() as f64)
+    crate::calendar::cutoff(date, 0)
 }
 
 /// Human-readable local timestamp for diagnostic dumps ("YYYY-MM-DD HH:MM:SS").
@@ -652,6 +528,15 @@ pub struct Session {
     pub calories_end: Option<i64>,
     pub speed_raw_last: Option<i64>,
     pub source: Option<String>,
+    pub session_uid: Option<String>,
+    pub recorder_id: Option<String>,
+    pub treadmill_id: Option<String>,
+    pub reporting_timezone: Option<String>,
+    pub revision: i64,
+    pub updated_at: Option<f64>,
+    pub received_at: Option<f64>,
+    pub continuation_uid: Option<String>,
+    pub counter_seed: Option<String>,
     /// The recording device's own de-glitched verdict on this session. Every
     /// client sums these rather than re-deriving a number from the endpoints
     /// above, which is what makes two devices agree. Null on rows written by a
@@ -688,6 +573,70 @@ impl Db {
         ] {
             ensure_column(&conn, "sessions", col, "INTEGER")?;
         }
+        for col in [
+            "session_uid",
+            "recorder_id",
+            "treadmill_id",
+            "reporting_timezone",
+            "continuation_uid",
+            "counter_seed",
+        ] {
+            ensure_column(&conn, "sessions", col, "TEXT")?;
+        }
+        ensure_column(&conn, "sessions", "revision", "INTEGER NOT NULL DEFAULT 0")?;
+        ensure_column(&conn, "sessions", "updated_at", "REAL")?;
+        ensure_column(&conn, "sessions", "received_at", "REAL")?;
+        conn.create_scalar_function(
+            "is_local",
+            3,
+            rusqlite::functions::FunctionFlags::SQLITE_UTF8,
+            |ctx| {
+                Ok(recorded_here(
+                    ctx.get::<Option<String>>(0)?.as_deref(),
+                    ctx.get::<Option<String>>(1)?.as_deref(),
+                    &ctx.get::<String>(2)?,
+                ))
+            },
+        )?;
+        conn.create_scalar_function(
+            "report_midnight",
+            1,
+            rusqlite::functions::FunctionFlags::SQLITE_UTF8,
+            |ctx| {
+                Ok(
+                    crate::calendar::cutoff(&crate::calendar::date(ctx.get(0)?), 0)
+                        .map(|t| t as i64),
+                )
+            },
+        )?;
+        conn.create_scalar_function(
+            "report_hour",
+            1,
+            rusqlite::functions::FunctionFlags::SQLITE_UTF8,
+            |ctx| Ok(crate::calendar::hour(ctx.get(0)?) as i64),
+        )?;
+        let legacy: Vec<(i64, f64, Option<String>)> = {
+            let mut q = conn
+                .prepare("SELECT id,started_ts,source FROM sessions WHERE session_uid IS NULL")?;
+            let rows = q
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows
+        };
+        for (id, ts, source) in legacy {
+            conn.execute(
+                "UPDATE sessions SET session_uid=? WHERE id=?",
+                params![
+                    legacy_uid(source.as_deref().unwrap_or(&this_device()), ts),
+                    id
+                ],
+            )?;
+        }
+        conn.execute_batch("CREATE TABLE IF NOT EXISTS session_tombstones(session_uid TEXT PRIMARY KEY,recorder_id TEXT,revision INTEGER NOT NULL,deleted_at REAL NOT NULL);")?;
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_sessions_uid ON sessions(session_uid);
+            CREATE INDEX IF NOT EXISTS idx_sessions_recorder ON sessions(recorder_id);",
+        )?;
         Ok(Db {
             conn: Mutex::new(conn),
         })
@@ -709,13 +658,93 @@ impl Db {
         start_duration_s: Option<u32>,
         source: Option<&str>,
     ) -> Result<i64> {
-        let c = self.conn();
+        let mut connection = self.conn();
+        let c = connection.transaction()?;
         c.execute(
             "INSERT INTO sessions(started_ts, local_date, display_unit, start_steps, start_duration_s, source)
              VALUES (?, ?, ?, ?, ?, ?)",
             params![ts, local_date(ts), display_unit, start_steps, start_duration_s, source],
         )?;
-        Ok(c.last_insert_rowid())
+        let id = c.last_insert_rowid();
+        let recorder =
+            if source.is_none_or(|n| n == this_device() || n == crate::config::device_name()) {
+                Some(this_recorder())
+            } else {
+                None
+            };
+        c.execute("UPDATE sessions SET session_uid=?,recorder_id=?,treadmill_id=?,reporting_timezone=?,revision=1,updated_at=? WHERE id=?",
+            params![uuid::Uuid::new_v4().to_string(),recorder,crate::config::active_treadmill_uid(),crate::config::load_settings().reporting_timezone,ts,id])?;
+        let treadmill: Option<String> = c.query_row(
+            "SELECT treadmill_id FROM sessions WHERE id=?",
+            params![id],
+            |r| r.get(0),
+        )?;
+        let seed:Option<String>=c.query_row("SELECT json_object('steps',steps_end,'duration_s',duration_s_end,'distance_raw',distance_raw_end,'calories',calories_end) FROM sessions WHERE local_date=? AND COALESCE(treadmill_id,'legacy')=COALESCE(?,'legacy') AND recorder_id=? AND received_at IS NOT NULL AND started_ts<? ORDER BY started_ts DESC LIMIT 1",params![local_date(ts),treadmill,this_recorder(),ts],|r|r.get(0)).optional()?;
+        if let Some(seed) = seed {
+            c.execute(
+                "UPDATE sessions SET counter_seed=? WHERE id=?",
+                params![seed, id],
+            )?;
+        }
+        c.commit()?;
+        Ok(id)
+    }
+
+    /// A durable deletion record prevents an offline peer restoring a deleted
+    /// session. Active recordings cannot be deleted through this operation.
+    pub fn delete_session(&self, uid: &str) -> Result<()> {
+        let mut c = self.conn();
+        let tx = c.transaction()?;
+        let row: Option<(i64, Option<String>, i64, Option<f64>)> = tx
+            .query_row(
+                "SELECT id,recorder_id,revision,ended_ts FROM sessions WHERE session_uid=?",
+                params![uid],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()?;
+        if let Some((id, recorder, revision, ended)) = row {
+            if ended.is_none() {
+                anyhow::bail!("cannot delete an active recording");
+            }
+            tx.execute("INSERT INTO session_tombstones VALUES(?,?,?,?) ON CONFLICT(session_uid) DO UPDATE SET revision=MAX(revision,excluded.revision)",params![uid,recorder,revision+1,now_ts()])?;
+            tx.execute("DELETE FROM samples WHERE session_id=?", params![id])?;
+            tx.execute(
+                "DELETE FROM sample_rollups_1m WHERE session_id=?",
+                params![id],
+            )?;
+            tx.execute("DELETE FROM sessions WHERE id=?", params![id])?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Split a live session at the reporting midnight. The next day's counter
+    /// seed prevents the pre-midnight odometer being counted a second time.
+    pub fn split_at_midnight(&self, sid: i64, now: f64) -> Result<Option<i64>> {
+        let mut c = self.conn();
+        let old = c
+            .query_row(
+                "SELECT * FROM sessions WHERE id=? AND ended_ts IS NULL",
+                params![sid],
+                row_to_session,
+            )
+            .optional()?;
+        let Some(old) = old else { return Ok(None) };
+        let day = local_date(now);
+        if old.local_date >= day {
+            return Ok(None);
+        }
+        let boundary = crate::calendar::next_midnight(old.started_ts).unwrap_or(now);
+        let started = crate::calendar::cutoff(&day, 0).unwrap_or(now);
+        let seed=json!({"steps":old.steps_end,"duration_s":old.duration_s_end,"distance_raw":old.distance_raw_end,"calories":old.calories_end}).to_string();
+        let tx = c.transaction()?;
+        tx.execute("UPDATE sessions SET ended_ts=?,closed_reason='reporting_midnight',revision=revision+1,updated_at=? WHERE id=?",params![boundary,now,sid])?;
+        bank_session_totals(&tx, sid)?;
+        tx.execute("INSERT INTO sessions(started_ts,local_date,display_unit,start_steps,start_duration_s,source,session_uid,recorder_id,treadmill_id,reporting_timezone,revision,updated_at,continuation_uid,counter_seed)
+            VALUES(?,?,?,?,?,?,?,?,?,?,1,?,?,?)",params![started,day,old.display_unit,old.steps_end,old.duration_s_end,crate::config::device_name(),uuid::Uuid::new_v4().to_string(),old.recorder_id,old.treadmill_id,crate::config::load_settings().reporting_timezone,now,old.session_uid,seed])?;
+        let next = tx.last_insert_rowid();
+        tx.commit()?;
+        Ok(Some(next))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -730,10 +759,11 @@ impl Db {
         speed_raw: Option<u32>,
         reason: &str,
     ) -> Result<()> {
-        let c = self.conn();
+        let mut connection = self.conn();
+        let c = connection.transaction()?;
         c.execute(
             "UPDATE sessions SET ended_ts=?, steps_end=?, duration_s_end=?, distance_raw_end=?,
-                                 calories_end=?, speed_raw_last=?, closed_reason=?
+                                 calories_end=?, speed_raw_last=?, closed_reason=?, revision=revision+1,updated_at=unixepoch()
              WHERE id=? AND ended_ts IS NULL",
             params![
                 ts,
@@ -749,6 +779,7 @@ impl Db {
         // Bank our verdict now the session is final, so the row that syncs out
         // carries the same number this device will display for it for ever.
         bank_session_totals(&c, session_id)?;
+        c.commit()?;
         Ok(())
     }
 
@@ -761,7 +792,8 @@ impl Db {
         calories: Option<u32>,
         speed_raw: Option<u32>,
     ) -> Result<()> {
-        let c = self.conn();
+        let mut connection = self.conn();
+        let c = connection.transaction()?;
 
         // Self-heal a stale baseline before recording progress.
         //
@@ -780,7 +812,7 @@ impl Db {
         let now = now_ts();
         if let Some(v) = steps {
             c.execute(
-                "UPDATE sessions SET start_steps = ?1
+                "UPDATE sessions SET revision=revision+1,updated_at=unixepoch(), start_steps = ?1
                  WHERE id = ?2 AND ended_ts IS NULL
                    AND start_steps IS NOT NULL AND ?1 < start_steps
                    AND (?1 <= 10 OR ?1 * 2 < start_steps)
@@ -790,7 +822,7 @@ impl Db {
         }
         if let Some(v) = duration_s {
             c.execute(
-                "UPDATE sessions SET start_duration_s = ?1
+                "UPDATE sessions SET revision=revision+1,updated_at=unixepoch(), start_duration_s = ?1
                  WHERE id = ?2 AND ended_ts IS NULL
                    AND start_duration_s IS NOT NULL AND ?1 < start_duration_s
                    AND (?1 <= 10 OR ?1 * 2 < start_duration_s)
@@ -800,7 +832,7 @@ impl Db {
         }
 
         c.execute(
-            "UPDATE sessions SET steps_end=?, duration_s_end=?, distance_raw_end=?,
+            "UPDATE sessions SET revision=revision+1,updated_at=unixepoch(), steps_end=?, duration_s_end=?, distance_raw_end=?,
                                  calories_end=?, speed_raw_last=? WHERE id=?",
             params![
                 steps,
@@ -811,6 +843,7 @@ impl Db {
                 session_id
             ],
         )?;
+        c.commit()?;
         Ok(())
     }
 
@@ -828,16 +861,16 @@ impl Db {
         let c = self.conn();
         let n = match mine {
             Some(name) if !name.is_empty() => c.execute(
-                "UPDATE sessions SET ended_ts=?, closed_reason=?
-                 WHERE ended_ts IS NULL AND (source IS NULL OR source = ?)",
+                "UPDATE sessions SET ended_ts=?, closed_reason=?,revision=revision+1,updated_at=unixepoch()
+                 WHERE ended_ts IS NULL AND received_at IS NULL AND is_local(recorder_id,source,?)",
                 params![now_ts(), reason, name],
             )?,
             // No identity of our own yet: only close unattributed sessions,
             // never another device's.
             _ => c.execute(
-                "UPDATE sessions SET ended_ts=?, closed_reason=?
-                 WHERE ended_ts IS NULL AND source IS NULL",
-                params![now_ts(), reason],
+                "UPDATE sessions SET ended_ts=?, closed_reason=?,revision=revision+1,updated_at=unixepoch()
+                 WHERE ended_ts IS NULL AND received_at IS NULL AND is_local(recorder_id,source,?)",
+                params![now_ts(), reason, this_device()],
             )?,
         };
         Ok(n)
@@ -851,32 +884,9 @@ impl Db {
     /// otherwise look like it is still walking for ever.
     pub fn remote_active(&self, mine: &str, fresh_secs: f64) -> Result<bool> {
         let c = self.conn();
-        // Freshness has to be measured from the most recent EVIDENCE of the
-        // walk, not from when it started. Testing `started_ts` answers "did a
-        // walk on another device begin recently", which is a different question
-        // and stays true long after the walking stopped: a session only gets an
-        // `ended_ts` once the other device's close reaches us, and if that sync
-        // is delayed — a backgrounded app, a dropped link — the row sits open
-        // and this reported a walk in progress for the rest of the window.
-        //
-        // Any sample or rollup bucket we hold for the session is proof somebody
-        // was moving at that moment. A rollup bucket is stamped at its start, so
-        // it counts until the end of its minute.
-        let n: i64 = c.query_row(
-            "SELECT COUNT(*) FROM sessions se
-             WHERE se.ended_ts IS NULL
-               AND se.source IS NOT NULL AND se.source <> ''
-               AND se.source <> ?
-               AND MAX(
-                     COALESCE((SELECT MAX(s.ts) FROM samples s
-                               WHERE s.session_id = se.id), 0),
-                     COALESCE((SELECT MAX(r.bucket_ts) + ? FROM sample_rollups_1m r
-                               WHERE r.session_id = se.id), 0),
-                     se.started_ts
-                   ) > ?",
-            params![mine, ROLLUP_RESOLUTION_S, now_ts() - fresh_secs],
-            |r| r.get(0),
-        )?;
+        // Local receipt time does not trust the recorder's wall clock. Equal
+        // revision imports do not refresh this timestamp.
+        let n:i64=c.query_row("SELECT COUNT(*) FROM sessions WHERE ended_ts IS NULL AND NOT is_local(recorder_id,source,?) AND received_at>? AND received_at<=?",params![mine,now_ts()-fresh_secs,now_ts()],|r|r.get(0))?;
         Ok(n > 0)
     }
 
@@ -955,7 +965,7 @@ impl Db {
         let mut rows = c.prepare(
             "SELECT id, steps_total, duration_s_total, distance_raw_total, calories_total,
                     steps_end, start_steps, duration_s_end, start_duration_s,
-                    distance_raw_end, calories_end, source
+                    distance_raw_end, calories_end, source, recorder_id, received_at
              FROM sessions WHERE local_date = ? ORDER BY started_ts, id",
         )?;
         let mut q = rows.query(params![local_date_s])?;
@@ -998,10 +1008,12 @@ impl Db {
             // whether a total happens to be banked would be worse than useless:
             // the first read banks it, and the device would then lose authority
             // over its own session and stop noticing that it had grown.
-            let recorded_here = match source.as_deref() {
-                Some(src) => src == mine,
-                None => true,
-            };
+            let recorded_here = r.get::<_, Option<f64>>(13)?.is_none()
+                && recorded_here(
+                    r.get::<_, Option<String>>(12)?.as_deref(),
+                    source.as_deref(),
+                    &mine,
+                );
 
             let t = match ours.get(&sid).copied().filter(|_| recorded_here) {
                 // We recorded it: our samples are the authority.
@@ -1100,11 +1112,11 @@ impl Db {
         let mut stmt = c.prepare(
             "SELECT se.local_date AS d,
                     COALESCE(NULLIF(se.source, ''), '') AS src,
-                    COALESCE(SUM(r.steps_delta), 0) AS steps
+                    COALESCE(SUM(r.steps_delta), 0) AS steps, se.recorder_id
              FROM sessions se
              JOIN sample_rollups_1m r ON r.session_id = se.id
              WHERE se.local_date >= ?
-             GROUP BY se.local_date, src
+             GROUP BY se.local_date, COALESCE(se.recorder_id,src)
              HAVING steps > 0
              ORDER BY d DESC, steps DESC",
         )?;
@@ -1113,6 +1125,7 @@ impl Db {
                 Ok(json!({
                     "date": r.get::<_, String>(0)?,
                     "source": r.get::<_, String>(1)?,
+                    "recorder_id": r.get::<_,Option<String>>(3)?,
                     "steps": r.get::<_, i64>(2)?,
                 }))
             })?
@@ -1130,42 +1143,9 @@ impl Db {
     pub fn hourly_steps(&self, local_date_s: &str) -> Result<Vec<Value>> {
         let mut buckets = [0i64; 24];
         let c = self.conn();
-        let floor = raw_floor(&c);
-
-        // Rolled hours: SUM(steps_delta) grouped by the local hour of the bucket.
-        {
-            let mut rstmt = c.prepare(
-                "SELECT CAST(strftime('%H', datetime(r.bucket_ts, 'unixepoch', 'localtime')) AS INTEGER) AS hour,
-                        COALESCE(SUM(r.steps_delta), 0)
-                 FROM sample_rollups_1m r JOIN sessions se ON se.id = r.session_id
-                 WHERE se.local_date = ? AND r.bucket_ts < ?
-                 GROUP BY hour",
-            )?;
-            let mut rows = rstmt.query(params![local_date_s, floor as i64])?;
-            while let Some(r) = rows.next()? {
-                let h: i64 = r.get(0)?;
-                buckets[h.clamp(0, 23) as usize] += r.get::<_, i64>(1)?;
-            }
+        for (ts, _, d) in day_chart_points(&c, local_date_s)? {
+            buckets[local_hour(ts)] += d[0];
         }
-
-        // Raw tail: increments at/after `floor`, attributed to the local hour of
-        // their sample. Same (spike, reset_max) as day_totals so bars reconcile.
-        let mut samples: Vec<(f64, i64)> = Vec::new();
-        {
-            let mut sstmt = c.prepare(
-                "SELECT s.ts, s.steps
-                 FROM samples s JOIN sessions se ON se.id = s.session_id
-                 WHERE se.local_date = ? AND s.steps IS NOT NULL
-                 ORDER BY s.ts, s.id",
-            )?;
-            let mut rows = sstmt.query(params![local_date_s])?;
-            while let Some(r) = rows.next()? {
-                samples.push((r.get(0)?, r.get(1)?));
-            }
-        }
-        deglitch_tail(&samples, floor, 50, 10, |i, d| {
-            buckets[local_hour(samples[i].0)] += d;
-        });
 
         Ok((0..24)
             .map(|h| json!({"hour": format!("{h:02}"), "steps": buckets[h]}))
@@ -1342,9 +1322,7 @@ impl Db {
             // It is also wrong on its own terms west of UTC, where UTC midnight
             // on the local date falls on the PREVIOUS local day and the column
             // would carry the wrong label outright.
-            format!(
-                "CAST(strftime('%s', date({ts_col}, 'unixepoch', 'localtime'), 'utc') AS INTEGER)"
-            )
+            format!("report_midnight({ts_col})")
         } else {
             format!("(CAST({ts_col} AS INTEGER) / {resolution_s}) * {resolution_s}")
         }
@@ -1379,69 +1357,26 @@ impl Db {
 
         match metric {
             "steps" | "calories" | "distance_raw" => {
-                let (col, delta_col, spike, reset) = match metric {
-                    "steps" => ("s.steps", "r.steps_delta", 50i64, 10i64),
-                    "calories" => ("s.calories", "r.calories_delta", 100i64, 10i64),
-                    _ => ("s.distance_raw", "r.distance_raw_delta", 200i64, 10i64),
+                let metric_index = match metric {
+                    "steps" => 0,
+                    "calories" => 3,
+                    _ => 2,
                 };
-
-                // Rollup tier (below the raw floor): already de-glitched deltas.
-                let roll_sql = format!(
-                    "SELECT {roll_bucket} AS bucket_ts, SUM({delta_col}) AS value
-                     FROM sample_rollups_1m r WHERE r.bucket_ts >= ? AND r.bucket_ts < ? GROUP BY bucket_ts"
-                );
-                Self::accumulate_sum(&c, &roll_sql, start_ts, end_ts, &mut merged)?;
-
-                // Raw tail (at/after the floor): de-glitch it the SAME way the
-                // rollup writer does, instead of the old `MAX(col) - MIN(col)` per
-                // bucket — that let a single stale frame (e.g. 346 wedged between
-                // 1800 and 1891) spike a chart bucket that the day/hour views
-                // correctly suppress. We walk the continuous stream (increments
-                // only, no first-sample baseline — matching stored rollups) and
-                // bucket each accepted increment the same way the SQL would.
-                let bucket_of = |ts: f64| -> i64 {
-                    if resolution_s >= 86400 {
-                        local_midnight(&local_date(ts))
-                            .map(|m| m as i64)
-                            .unwrap_or((ts as i64 / resolution_s) * resolution_s)
-                    } else {
-                        (ts as i64 / resolution_s) * resolution_s
-                    }
-                };
-                let mut samples: Vec<(f64, i64)> = Vec::new();
-                {
-                    let raw_sql = format!(
-                        "SELECT s.ts, {col} FROM samples s
-                         WHERE s.ts >= ? AND s.ts < ? AND {col} IS NOT NULL AND s.session_id IS NOT NULL
-                         ORDER BY s.ts, s.id"
-                    );
-                    let mut stmt = c.prepare(&raw_sql)?;
-                    let mut rows = stmt.query(params![effective_start, end_ts])?;
-                    while let Some(r) = rows.next()? {
-                        samples.push((r.get(0)?, r.get(1)?));
-                    }
-                }
-                let n = samples.len();
-                let mut prev: Option<i64> = None;
-                for i in 0..n {
-                    let (ts, v) = samples[i];
-                    if i > 0 && i + 1 < n {
-                        let p = samples[i - 1].1;
-                        let nx = samples[i + 1].1;
-                        if (v - p > spike && v - nx > spike) || (p - v > spike && nx - v > spike) {
-                            continue;
-                        }
-                    }
-                    match prev {
-                        None => prev = Some(v),
-                        Some(pv) => {
-                            let d = v - pv;
-                            if d > 0 {
-                                merged.entry(bucket_of(ts)).or_insert((0.0, 0.0)).0 += d as f64;
-                                prev = Some(v);
-                            } else if d < 0 && (v <= reset || v * 2 < pv) {
-                                prev = Some(v);
-                            }
+                let mut stmt=c.prepare("SELECT DISTINCT local_date FROM sessions WHERE local_date>=? AND local_date<=? ORDER BY local_date")?;
+                let dates = stmt
+                    .query_map(params![local_date(start_ts), local_date(end_ts)], |r| {
+                        r.get::<_, String>(0)
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                for date in dates {
+                    for (ts, _, d) in day_chart_points(&c, &date)? {
+                        if ts >= start_ts && ts < end_ts {
+                            let bucket = if resolution_s >= 86400 {
+                                local_midnight(&date).unwrap_or(ts) as i64
+                            } else {
+                                (ts as i64 / resolution_s) * resolution_s
+                            };
+                            merged.entry(bucket).or_insert((0.0, 0.0)).0 += d[metric_index] as f64;
                         }
                     }
                 }
@@ -1454,13 +1389,13 @@ impl Db {
             "speed_raw" => {
                 let raw_sql = format!(
                     "SELECT {raw_bucket} AS bucket_ts, SUM(speed_raw) AS sum_v, COUNT(*) AS n
-                     FROM samples s WHERE s.ts >= ? AND s.ts < ? AND speed_raw IS NOT NULL AND speed_raw > 0
+                     FROM samples s WHERE NOT EXISTS(SELECT 1 FROM sample_rollups_1m r WHERE r.session_id=s.session_id AND r.bucket_ts=CAST(s.ts AS INTEGER)/60*60) AND s.ts >= ? AND s.ts < ? AND speed_raw IS NOT NULL AND speed_raw > 0
                      GROUP BY bucket_ts"
                 );
                 let roll_sql = format!(
                     "SELECT {roll_bucket} AS bucket_ts, SUM(speed_raw_avg * running_samples) AS sum_v,
                             SUM(running_samples) AS n
-                     FROM sample_rollups_1m r WHERE r.bucket_ts >= ? AND r.bucket_ts < ?
+                     FROM sample_rollups_1m r JOIN sessions se ON se.id=r.session_id WHERE (se.received_at IS NOT NULL OR NOT is_local(se.recorder_id,se.source,'') OR r.bucket_ts < {raw_floor}) AND r.bucket_ts >= ? AND r.bucket_ts < ?
                        AND speed_raw_avg IS NOT NULL GROUP BY bucket_ts"
                 );
                 Self::accumulate_avg(&c, &raw_sql, effective_start, end_ts, &mut merged)?;
@@ -1492,11 +1427,11 @@ impl Db {
                 //   keeps that judgement authoritative here too.
                 let raw_sql = format!(
                     "SELECT {raw_bucket} AS bucket_ts, SUM(CASE WHEN status = 3 THEN 1 ELSE 0 END) * {SAMPLE_INTERVAL_S} AS value
-                     FROM samples s WHERE s.ts >= ? AND s.ts < ? AND s.session_id IS NOT NULL GROUP BY bucket_ts"
+                     FROM samples s WHERE NOT EXISTS(SELECT 1 FROM sample_rollups_1m r WHERE r.session_id=s.session_id AND r.bucket_ts=CAST(s.ts AS INTEGER)/60*60) AND s.ts >= ? AND s.ts < ? AND s.session_id IS NOT NULL GROUP BY bucket_ts"
                 );
                 let roll_sql = format!(
                     "SELECT {roll_bucket} AS bucket_ts, SUM(running_samples) * {SAMPLE_INTERVAL_S} AS value
-                     FROM sample_rollups_1m r WHERE r.bucket_ts >= ? AND r.bucket_ts < ? GROUP BY bucket_ts"
+                     FROM sample_rollups_1m r JOIN sessions se ON se.id=r.session_id WHERE (se.received_at IS NOT NULL OR NOT is_local(se.recorder_id,se.source,'') OR r.bucket_ts < {raw_floor}) AND r.bucket_ts >= ? AND r.bucket_ts < ? GROUP BY bucket_ts"
                 );
                 Self::accumulate_sum(&c, &raw_sql, effective_start, end_ts, &mut merged)?;
                 Self::accumulate_sum(&c, &roll_sql, start_ts, end_ts, &mut merged)?;
@@ -1654,65 +1589,30 @@ impl Db {
     ) -> Result<(i64, f64)> {
         let res_s = ROLLUP_RESOLUTION_S;
 
-        // De-glitched per-(bucket,session) metric deltas over the context-widened read.
-        let mut steps_s: Vec<(i64, i64, i64)> = Vec::new();
-        let mut dist_s: Vec<(i64, i64, i64)> = Vec::new();
-        let mut cal_s: Vec<(i64, i64, i64)> = Vec::new();
-        let mut dur_s: Vec<(i64, i64, i64)> = Vec::new();
-        {
-            let mut q = c.prepare(
-                // Only samples from sessions THIS device recorded. A follower
-                // also holds the walker's raw tail, and rolling that up here
-                // banked the tail's first odometer reading as a fresh day
-                // baseline (there is no older local sample to seed from) and
-                // then overwrote the walker's correct bucket through the
-                // upsert. NULL source is legacy local history.
-                "SELECT CAST(s.ts AS INTEGER), s.session_id, s.steps, s.distance_raw,
-                        s.calories, s.duration_s
-                 FROM samples s JOIN sessions se ON se.id = s.session_id
-                 WHERE s.ts > ? AND s.ts < ? AND s.session_id IS NOT NULL
-                   AND (se.source IS NULL OR se.source = ?)
-                 ORDER BY s.ts, s.id",
-            )?;
-            let mine = this_device();
-            let mut rows = q.query(params![deglitch_start, agg_end, mine])?;
-            while let Some(r) = rows.next()? {
-                let ts: i64 = r.get(0)?;
-                let sess: i64 = r.get(1)?;
-                if let Some(v) = r.get::<_, Option<i64>>(2)? {
-                    steps_s.push((ts, sess, v));
-                }
-                if let Some(v) = r.get::<_, Option<i64>>(3)? {
-                    dist_s.push((ts, sess, v));
-                }
-                if let Some(v) = r.get::<_, Option<i64>>(4)? {
-                    cal_s.push((ts, sess, v));
-                }
-                if let Some(v) = r.get::<_, Option<i64>>(5)? {
-                    dur_s.push((ts, sess, v));
+        let _ = deglitch_start; // retained for the internal call contract
+        let (mut steps_d, mut dur_d, mut dist_d, mut cal_d) = (
+            std::collections::HashMap::new(),
+            std::collections::HashMap::new(),
+            std::collections::HashMap::new(),
+            std::collections::HashMap::new(),
+        );
+        let mut dates=c.prepare("SELECT DISTINCT se.local_date FROM samples s JOIN sessions se ON se.id=s.session_id WHERE s.ts>=? AND s.ts<? AND se.received_at IS NULL AND is_local(se.recorder_id,se.source,?)")?;
+        let days = dates
+            .query_map(params![agg_start, agg_end, this_device()], |r| {
+                r.get::<_, String>(0)
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for date in days {
+            for (ts, sid, d) in raw_day_points(c, &date)? {
+                if ts >= agg_start && ts < agg_end {
+                    let key = ((ts as i64).div_euclid(res_s) * res_s, sid);
+                    *steps_d.entry(key).or_insert(0) += d[0];
+                    *dur_d.entry(key).or_insert(0) += d[1];
+                    *dist_d.entry(key).or_insert(0) += d[2];
+                    *cal_d.entry(key).or_insert(0) += d[3];
                 }
             }
         }
-        // One seed per metric: the last recorded value at or before the read
-        // window, at ANY age. The 180 s lookback only widens the READ; after a
-        // longer outage the walk would otherwise restart with no predecessor and
-        // drop the increment the treadmill accrued while we were away.
-        let seed_of = |col: &str| -> Result<Option<i64>> {
-            Ok(c.query_row(
-                &format!(
-                    "SELECT s.{col} FROM samples s
-                     WHERE s.ts <= ? AND s.{col} IS NOT NULL AND s.session_id IS NOT NULL
-                     ORDER BY s.ts DESC, s.id DESC LIMIT 1"
-                ),
-                params![deglitch_start],
-                |r| r.get(0),
-            )
-            .optional()?)
-        };
-        let steps_d = deglitch_bucketed(&steps_s, res_s, 50, 10, seed_of("steps")?);
-        let dist_d = deglitch_bucketed(&dist_s, res_s, 200, 10, seed_of("distance_raw")?);
-        let cal_d = deglitch_bucketed(&cal_s, res_s, 100, 10, seed_of("calories")?);
-        let dur_d = deglitch_bucketed(&dur_s, res_s, 600, 10, seed_of("duration_s")?);
 
         // Stateless speed/running/total aggregates per (bucket,session) over the
         // [agg_start, agg_end) window — the authoritative bucket set.
@@ -1737,12 +1637,12 @@ impl Db {
                     -- BeltState::Other's rustdoc in drivers/mod.rs.
                     SUM(CASE WHEN s.status = 3 THEN 1 ELSE 0 END) AS running_samples,
                     COUNT(*) AS total_samples
-             FROM samples s WHERE s.ts >= ? AND s.ts < ? AND s.session_id IS NOT NULL
+             FROM samples s JOIN sessions se ON se.id=s.session_id WHERE s.ts >= ? AND s.ts < ? AND s.session_id IS NOT NULL AND se.received_at IS NULL AND is_local(se.recorder_id,se.source,?)
              GROUP BY bucket_ts, s.session_id"
         );
         let mut agg = c.prepare(&agg_sql)?;
         let groups: Vec<RollupRow> = agg
-            .query_map(params![agg_start, agg_end], |r| {
+            .query_map(params![agg_start, agg_end, this_device()], |r| {
                 let bucket_ts: i64 = r.get(0)?;
                 let session_id: Option<i64> = r.get(1)?;
                 let key = (bucket_ts, session_id.unwrap_or(0));
@@ -1872,20 +1772,21 @@ impl Db {
     /// loop last ran, and reads low by exactly that much.
     pub fn export_since(&self, include_raw: bool, raw_since: Option<f64>) -> Result<Value> {
         let c = self.conn();
-        // A dump is how our sessions reach every other device, and they will sum
-        // the banked columns verbatim. Refresh the still-open one first (its last
-        // minute is not rolled up yet) so a mid-walk push is exact rather than a
-        // rollup-interval behind.
-        let open_ids: Vec<i64> = {
-            let mut stmt = c.prepare("SELECT id FROM sessions WHERE ended_ts IS NULL")?;
-            let ids = stmt
-                .query_map([], |r| r.get::<_, i64>(0))?
-                .filter_map(|r| r.ok())
-                .collect();
-            ids
+        // Refresh all locally recorded dates, including closed legacy sessions.
+        // Exporting before opening History must give the same totals as a local
+        // day query; otherwise a restore/follower trusts stale banked columns.
+        // Compute once per date, not once per session (which repeats a day's scan).
+        let dates: Vec<String> = {
+            let mut stmt = c.prepare("SELECT DISTINCT local_date FROM sessions WHERE received_at IS NULL AND is_local(recorder_id,source,?)")?;
+            let rows = stmt
+                .query_map(params![this_device()], |r| r.get(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows
         };
-        for sid in open_ids {
-            bank_session_totals(&c, sid)?;
+        for date in dates {
+            for (sid, totals) in day_session_totals(&c, &date)? {
+                write_banked_totals(&c, sid, totals)?;
+            }
         }
         let sessions = rows_as_json(&c, "SELECT * FROM sessions ORDER BY id")?;
         let rollups = rows_as_json(
@@ -1903,10 +1804,13 @@ impl Db {
             // steps they contain. Additive — older importers ignore it and keep
             // the previous insert-only behaviour.
             "origin": this_device(),
+            "origin_id": this_recorder(),
+            "reporting_timezone": crate::config::load_settings().reporting_timezone,
             "include_raw": include_raw,
             "sessions": sessions,
             "rollups_1m": rollups,
             "speed_marks": speed_marks,
+            "deleted_sessions":rows_as_json(&c,"SELECT * FROM session_tombstones ORDER BY session_uid")?,
         });
         if include_raw {
             let samples = match raw_since {
@@ -1938,8 +1842,8 @@ impl Db {
             Some(1) | Some(2) => {}
             other => anyhow::bail!("unsupported dump version: {other:?}"),
         }
-        if mode != "merge" && mode != "replace" {
-            anyhow::bail!("mode must be 'merge' or 'replace', got {mode}");
+        if mode != "merge" && mode != "sync" && mode != "replace" {
+            anyhow::bail!("mode must be 'merge', 'sync' or 'replace', got {mode}");
         }
         // Who produced this dump. A device is the sole authority on the sessions
         // IT recorded, so rows carrying that source may be UPDATED here rather
@@ -2007,6 +1911,23 @@ impl Db {
         let mut c = self.conn();
         let tx = c.transaction()?;
         if mode == "replace" {
+            tx.execute("DELETE FROM session_tombstones", [])?;
+        }
+        for tomb in dump["deleted_sessions"].as_array().into_iter().flatten() {
+            let uid = tomb["session_uid"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("invalid deletion identity"))?;
+            if mode!="replace" && tx.query_row("SELECT EXISTS(SELECT 1 FROM sessions WHERE session_uid=? AND ended_ts IS NULL AND received_at IS NULL AND is_local(recorder_id,source,?))",params![uid,this_device()],|r|r.get::<_,bool>(0))? {anyhow::bail!("cannot import deletion of an active local recording");}
+            tx.execute("INSERT INTO session_tombstones VALUES(?,?,?,?) ON CONFLICT(session_uid) DO UPDATE SET revision=MAX(revision,excluded.revision)",params![uid,tomb["recorder_id"].as_str(),tomb["revision"].as_i64().unwrap_or(1),tomb["deleted_at"].as_f64().unwrap_or_else(now_ts)])?;
+        }
+        tx.execute("DELETE FROM samples WHERE session_id IN(SELECT id FROM sessions WHERE session_uid IN(SELECT session_uid FROM session_tombstones))",[])?;
+        tx.execute("DELETE FROM sample_rollups_1m WHERE session_id IN(SELECT id FROM sessions WHERE session_uid IN(SELECT session_uid FROM session_tombstones))",[])?;
+        let deleted_count = tx.execute(
+            "DELETE FROM sessions WHERE session_uid IN(SELECT session_uid FROM session_tombstones)",
+            [],
+        )?;
+        counts.insert("deleted_sessions".into(), json!(deleted_count));
+        if mode == "replace" {
             tx.execute("DELETE FROM sample_rollups_1m", [])?;
             tx.execute("DELETE FROM samples", [])?;
             tx.execute("DELETE FROM sessions", [])?;
@@ -2025,11 +1946,29 @@ impl Db {
                 None => continue,
             };
             let old_id = i64_of(s, "id");
-            if mode == "merge" {
+            let uid = str_of(s, "session_uid").unwrap_or_else(|| {
+                legacy_uid(
+                    str_of(s, "source")
+                        .or_else(|| origin.clone())
+                        .as_deref()
+                        .unwrap_or(&this_device()),
+                    started_ts,
+                )
+            });
+            if tx.query_row(
+                "SELECT COUNT(*) FROM session_tombstones WHERE session_uid=?",
+                params![uid],
+                |r| r.get::<_, i64>(0),
+            )? > 0
+            {
+                bump(&mut counts, "skipped_sessions");
+                continue;
+            }
+            if mode != "replace" {
                 let existing: Option<i64> = tx
                     .query_row(
-                        "SELECT id FROM sessions WHERE started_ts = ?",
-                        params![started_ts],
+                        "SELECT id FROM sessions WHERE session_uid=? OR (? AND started_ts=? AND COALESCE(source,?)=COALESCE(?,?)) ORDER BY id LIMIT 1",
+                        params![uid,s.get("session_uid").and_then(|v|v.as_str()).is_none(),started_ts,this_device(),str_of(s,"source").or_else(||origin.clone()),this_device()],
                         |r| r.get(0),
                     )
                     .optional()?;
@@ -2041,10 +1980,47 @@ impl Db {
                     // change all through a walk (steps_end climbs, ended_ts
                     // lands at the end), and a frozen first copy is how a
                     // follower ends up showing a session that never finishes.
-                    let owned = match (&origin, str_of(s, "source")) {
-                        (Some(o), Some(src)) => &src == o,
-                        _ => false,
+                    let (stored_recorder, revision): (Option<String>, i64) = tx.query_row(
+                        "SELECT recorder_id,revision FROM sessions WHERE id=?",
+                        params![eid],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )?;
+                    let incoming_recorder = str_of(s, "recorder_id");
+                    let owned = if let Some(ref id) = incoming_recorder {
+                        if stored_recorder.as_ref().is_some_and(|old| old != id) {
+                            anyhow::bail!("session recorder identity conflict");
+                        }
+                        i64_of(s, "revision").unwrap_or(0) > revision
+                    } else if stored_recorder.is_some() {
+                        false
+                    } else {
+                        match (&origin, str_of(s, "source")) {
+                            (_, Some(src)) if mode == "sync" => src != this_device(),
+                            (Some(o), Some(src)) => &src == o,
+                            _ => false,
+                        }
                     };
+                    if incoming_recorder.is_some()
+                        && i64_of(s, "revision").unwrap_or(0) == revision
+                        && !recorded_here(
+                            incoming_recorder.as_deref(),
+                            str_of(s, "source").as_deref(),
+                            &this_device(),
+                        )
+                    {
+                        owned_sids.insert(eid);
+                    }
+                    if owned
+                        && mode == "sync"
+                        && stored_recorder.as_deref() == Some(this_recorder().as_str())
+                        && tx.query_row(
+                            "SELECT ended_ts IS NULL AND received_at IS NULL FROM sessions WHERE id=?",
+                            params![eid],
+                            |r| r.get::<_, bool>(0),
+                        )?
+                    {
+                        anyhow::bail!("conflicting active recorder revision");
+                    }
                     if owned {
                         tx.execute(
                             "UPDATE sessions SET ended_ts=?, local_date=?, display_unit=?,
@@ -2077,6 +2053,7 @@ impl Db {
                                 eid,
                             ],
                         )?;
+                        import_identity(&tx, s, eid, &uid)?;
                         owned_sids.insert(eid);
                         bump(&mut counts, "updated_sessions");
                     } else {
@@ -2112,6 +2089,7 @@ impl Db {
                 ],
             )?;
             let new_id = tx.last_insert_rowid();
+            import_identity(&tx, s, new_id, &uid)?;
             if let Some(oid) = old_id {
                 id_map.insert(oid, new_id);
             }
@@ -2135,8 +2113,12 @@ impl Db {
                 bump(&mut counts, "skipped_old_samples");
                 continue;
             }
+            if i64_of(sm, "session_id").is_some_and(|id| !id_map.contains_key(&id)) {
+                bump(&mut counts, "skipped_samples");
+                continue;
+            }
             let new_sid = i64_of(sm, "session_id").and_then(|o| id_map.get(&o).copied());
-            if mode == "merge" {
+            if mode != "replace" {
                 let dup: Option<i64> = tx
                     .query_row(
                         "SELECT 1 FROM samples WHERE ts = ? AND (session_id IS ? OR session_id = ?) LIMIT 1",
@@ -2166,8 +2148,12 @@ impl Db {
                 Some(t) => t,
                 None => continue,
             };
+            if i64_of(rr, "session_id").is_some_and(|id| !id_map.contains_key(&id)) {
+                bump(&mut counts, "skipped_rollups");
+                continue;
+            }
             let new_sid = i64_of(rr, "session_id").and_then(|o| id_map.get(&o).copied());
-            if mode == "merge" {
+            if mode != "replace" {
                 let dup: Option<i64> = tx
                     .query_row(
                         "SELECT 1 FROM sample_rollups_1m WHERE bucket_ts=? AND (session_id IS ? OR session_id = ?) LIMIT 1",
@@ -2240,7 +2226,7 @@ impl Db {
                 None => continue,
             };
             let set_speed = f64_of(mk, "set_speed").unwrap_or(0.0);
-            if mode == "merge" {
+            if mode != "replace" {
                 let dup: Option<i64> = tx
                     .query_row(
                         "SELECT 1 FROM speed_marks WHERE ts = ? AND set_speed = ? LIMIT 1",
@@ -2265,6 +2251,16 @@ impl Db {
         }
 
         tx.commit()?;
+        if mode == "sync" {
+            if let Some(tz) = dump["reporting_timezone"].as_str() {
+                if crate::calendar::set_zone(tz) {
+                    let mut settings = crate::config::load_settings();
+                    settings.reporting_timezone = tz.into();
+                    crate::config::save_settings(&settings);
+                }
+            }
+        }
+
         Ok(Value::Object(counts))
     }
 
@@ -2285,42 +2281,13 @@ impl Db {
                 )
             }
         };
-        let end = midnight + until_sod as f64;
-        let floor = raw_floor(&c);
-
-        // Tier-1: rollup deltas for buckets on this local day, up to the cutoff.
-        let (mut steps, mut dist): (i64, i64) = c.query_row(
-            "SELECT COALESCE(SUM(steps_delta),0), COALESCE(SUM(distance_raw_delta),0)
-             FROM sample_rollups_1m
-             WHERE bucket_ts >= ? AND bucket_ts <= ?",
-            params![midnight as i64, end as i64],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?;
-
-        // Tier-0 tail: raw increments at/after `floor` up to the same cutoff. For
-        // a fully-rolled past date `floor` is beyond `end`, so nothing is added.
-        if end >= floor {
-            let mut steps_v: Vec<(f64, i64)> = Vec::new();
-            let mut dist_v: Vec<(f64, i64)> = Vec::new();
-            let mut stmt = c.prepare(
-                "SELECT s.ts, s.steps, s.distance_raw
-                 FROM samples s JOIN sessions se ON se.id = s.session_id
-                 WHERE se.local_date = ? AND s.ts <= ? ORDER BY s.ts, s.id",
-            )?;
-            let mut rows = stmt.query(params![date, end])?;
-            while let Some(r) = rows.next()? {
-                let ts: f64 = r.get(0)?;
-                if let Some(v) = r.get::<_, Option<i64>>(1)? {
-                    steps_v.push((ts, v));
-                }
-                if let Some(v) = r.get::<_, Option<i64>>(2)? {
-                    dist_v.push((ts, v));
-                }
+        let end = crate::calendar::cutoff(date, until_sod).unwrap_or(midnight);
+        let (mut steps, mut dist) = (0i64, 0i64);
+        for (ts, _, d) in day_chart_points(&c, date)? {
+            if ts <= end {
+                steps += d[0];
+                dist += d[2];
             }
-            drop(rows);
-            drop(stmt);
-            steps += deglitch_tail_total(&steps_v, floor, 50, 10);
-            dist += deglitch_tail_total(&dist_v, floor, 200, 10);
         }
 
         Ok(json!({"date": date, "until_sod": until_sod, "steps": steps, "distance_raw": dist}))
@@ -2471,6 +2438,15 @@ fn row_to_session(r: &rusqlite::Row) -> rusqlite::Result<Session> {
         distance_raw_total: r.get("distance_raw_total").unwrap_or(None),
         calories_total: r.get("calories_total").unwrap_or(None),
         source: r.get("source")?,
+        session_uid: r.get("session_uid").unwrap_or(None),
+        recorder_id: r.get("recorder_id").unwrap_or(None),
+        treadmill_id: r.get("treadmill_id").unwrap_or(None),
+        reporting_timezone: r.get("reporting_timezone").unwrap_or(None),
+        revision: r.get("revision").unwrap_or(0),
+        updated_at: r.get("updated_at").unwrap_or(None),
+        received_at: r.get("received_at").unwrap_or(None),
+        continuation_uid: r.get("continuation_uid").unwrap_or(None),
+        counter_seed: r.get("counter_seed").unwrap_or(None),
     })
 }
 
@@ -2614,6 +2590,12 @@ mod tests {
             "a walk silent for twenty minutes must not still be reported as live"
         );
 
+        db.conn()
+            .execute(
+                "UPDATE sessions SET received_at=? WHERE id=?",
+                params![now_ts(), sid],
+            )
+            .unwrap();
         // A frame arrives now — that is what walking looks like.
         db.insert_sample(
             Some(sid),
@@ -2646,9 +2628,24 @@ mod tests {
             Some(1),
         )
         .unwrap();
+        db.close_session(
+            sid,
+            now_ts(),
+            Some(560),
+            Some(660),
+            Some(0),
+            Some(0),
+            Some(300),
+            "test_complete",
+        )
+        .unwrap();
         assert!(
-            !db.remote_active("Mac", 240.0).unwrap() || db.remote_active("iPhone", 240.0).unwrap(),
-            "sanity: ownership is by source, not by recency"
+            !db.remote_active("Mac", 240.0).unwrap(),
+            "our modern recorder ID is never remote"
+        );
+        assert!(
+            !db.remote_active("Renamed Mac", 240.0).unwrap(),
+            "renaming a label cannot transfer ownership"
         );
     }
 
@@ -2893,17 +2890,22 @@ mod tests {
         let mut half = partial.clone();
         let cut: Vec<Value> = half["samples"].as_array().unwrap()[..3].to_vec();
         half["samples"] = json!(cut);
+        set_test_device("Mac");
         follower.import_dump(&half, "merge").unwrap();
         follower.rollup_samples_at(base + 180.0).unwrap();
 
         // Now the rest arrives, with the walker's own complete bucket.
+        set_test_device("iPhone");
         walker.rollup_samples_at(base + 180.0).unwrap();
         let mut full = walker.export_since(true, Some(0.0)).unwrap();
         full["origin"] = json!("iPhone");
+        set_test_device("Mac");
         follower.import_dump(&full, "merge").unwrap();
 
         let date = local_date(base);
+        set_test_device("iPhone");
         let w = walker.day_totals(&date).unwrap()["steps"].as_i64().unwrap();
+        set_test_device("Mac");
         let f = follower.day_totals(&date).unwrap()["steps"]
             .as_i64()
             .unwrap();
@@ -3184,10 +3186,10 @@ mod tests {
             .timeseries("steps", 3600, now_ts() - 86_400.0, now_ts() + 1.0)
             .unwrap();
         let total: f64 = series.iter().map(|b| b["value"].as_f64().unwrap()).sum();
-        // De-glitched increments = 3 + 91 + 5 + 5 = 104. The old MAX-MIN path gave
-        // 1901 - 346 = 1555 — a phantom spike the day/hour views never showed.
+        // Charts now include the same first-reading credit as day totals and rollups.
+        // The stale 346 contributes nothing; total remains 1901 across compaction.
         assert_eq!(
-            total as i64, 104,
+            total as i64, 1901,
             "timeseries raw tail must de-glitch, not MAX-MIN"
         );
     }
@@ -3265,6 +3267,50 @@ mod tests {
              the raw query in `timeseries` and the rollup writer's \
              running_samples (both in db.rs) must share one in-session \
              definition of running time"
+        );
+    }
+
+    #[test]
+    fn export_refreshes_closed_legacy_totals_before_any_day_query() {
+        let db = mem();
+        let ts = now_ts() - 100.0;
+        let sid = db.open_session(ts, "km/h", Some(0), Some(0), None).unwrap();
+        db.insert_sample(
+            Some(sid),
+            ts + 1.0,
+            Some(10),
+            Some(1),
+            Some(300),
+            Some(1),
+            Some(0),
+            Some(3),
+        )
+        .unwrap();
+        db.close_session(
+            sid,
+            ts + 2.0,
+            Some(10),
+            Some(1),
+            Some(1),
+            Some(0),
+            Some(300),
+            "stopped",
+        )
+        .unwrap();
+        // A bank left by an older accounting algorithm, not yet viewed locally.
+        db.conn()
+            .execute(
+                "UPDATE sessions SET steps_total=999 WHERE id=?",
+                params![sid],
+            )
+            .unwrap();
+        let dump = db.export_all(true).unwrap();
+        assert_eq!(dump["sessions"][0]["steps_total"], 10);
+        let restored = mem();
+        restored.import_dump(&dump, "merge").unwrap();
+        assert_eq!(
+            restored.day_totals(&local_date(ts)).unwrap(),
+            db.day_totals(&local_date(ts)).unwrap()
         );
     }
 
@@ -3926,6 +3972,12 @@ mod tests {
         };
         insert_bucket(32_400, 30, 8); // 09:00
         insert_bucket(36_000, 40, 10); // 10:00
+        db.conn()
+            .execute(
+                "INSERT INTO rollup_state VALUES(?,?,?)",
+                params![ROLLUP_KIND, midnight + 40000.0, midnight + 40000.0],
+            )
+            .unwrap();
         let date = local_date(now_ts());
 
         // Before 09:00 → nothing.
@@ -3943,5 +3995,276 @@ mod tests {
         // A date with no data is zero, not an error.
         let empty = db.timeofday_totals("2000-01-01", 86_400).unwrap();
         assert_eq!(empty["steps"].as_i64().unwrap(), 0);
+    }
+}
+
+#[cfg(test)]
+mod sync_safety_tests {
+    use super::*;
+
+    #[test]
+    fn shared_web_accounting_vectors() {
+        let cases: Value =
+            serde_json::from_str(include_str!("../tests/vectors/accounting.json")).unwrap();
+        for case in cases.as_array().unwrap() {
+            let values = case["values"].as_array().unwrap();
+            let sids = case["sessions"].as_array().unwrap();
+            let rows: Vec<_> = values
+                .iter()
+                .enumerate()
+                .filter_map(|(i, v)| v.as_i64().map(|v| (i, v)))
+                .collect();
+            let input: Vec<_> = rows.iter().map(|(i, v)| (*i as f64, *v)).collect();
+            let mut actual = std::collections::BTreeMap::<String, i64>::new();
+            deglitch_tail(&input, 0., 50, 10, |i, d| {
+                *actual.entry(sids[rows[i].0].to_string()).or_default() += d
+            });
+            assert_eq!(json!(actual), case["totals"], "{}", case["name"]);
+        }
+    }
+
+    #[test]
+    fn foreign_raw_cannot_change_local_verdict_or_rollups() {
+        set_test_device("recorder");
+        let db = Db::open(":memory:").unwrap();
+        let t = (now_ts() / 60.).floor() * 60. - 600.;
+        let day = local_date(t);
+        let dump = json!({"format":"lifespan-sc110-dump","version":2,"origin":"foreign",
+          "sessions":[{"id":1,"started_ts":t,"local_date":day,"source":"foreign","steps_total":120}],
+          "samples":[{"session_id":1,"ts":t+1.,"steps":100,"status":3},{"session_id":1,"ts":t+11.,"steps":120,"status":3}],
+          "rollups_1m":[{"bucket_ts":t as i64,"session_id":1,"steps_delta":120,"total_samples":60,"running_samples":60}]});
+        db.import_dump(&dump, "merge").unwrap();
+        let local = db
+            .open_session(t + 120., "km/h", Some(100), None, Some("recorder"))
+            .unwrap();
+        for (offset, v) in [(121., 100), (131., 110)] {
+            db.insert_sample(
+                Some(local),
+                t + offset,
+                Some(v),
+                None,
+                None,
+                None,
+                None,
+                Some(3),
+            )
+            .unwrap();
+        }
+        assert_eq!(db.day_totals(&day).unwrap()["steps"], 230);
+        db.rollup_samples_at(t + 180.).unwrap();
+        let out = db.export_all(false).unwrap();
+        let foreign = out["rollups_1m"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["bucket_ts"] == t as i64)
+            .unwrap();
+        assert_eq!(foreign["steps_delta"], 120);
+        assert_eq!(foreign["running_samples"], 60);
+    }
+
+    #[test]
+    fn sync_import_accepts_relayed_foreign_updates_but_preserves_recorder() {
+        set_test_device("A");
+        let db = Db::open(":memory:").unwrap();
+        let t = now_ts() - 600.;
+        let make = |origin: &str, n: i64| {
+            json!({"format":"lifespan-sc110-dump","version":2,"origin":origin,
+          "sessions":[{"id":1,"started_ts":t,"source":"B","steps_total":n},
+                      {"id":2,"started_ts":t+1.,"source":"A","steps_total":n}]})
+        };
+        db.import_dump(&make("B", 100), "sync").unwrap();
+        db.import_dump(&make("C", 200), "sync").unwrap();
+        let out = db.export_all(false).unwrap();
+        let rows = out["sessions"].as_array().unwrap();
+        assert_eq!(
+            rows.iter().find(|r| r["source"] == "B").unwrap()["steps_total"],
+            200
+        );
+        assert_eq!(
+            rows.iter().find(|r| r["source"] == "A").unwrap()["steps_total"],
+            100
+        );
+    }
+    #[test]
+    fn simultaneous_recorders_do_not_overwrite_local_session() {
+        set_test_device("A");
+        let db = Db::open(":memory:").unwrap();
+        let t = now_ts() - 600.;
+        let own = db
+            .open_session(t, "km/h", Some(10), None, Some("A"))
+            .unwrap();
+        let dump = json!({"format":"lifespan-sc110-dump","version":2,"origin":"B",
+          "sessions":[{"id":1,"started_ts":t,"source":"B","steps_total":200}]});
+        db.import_dump(&dump, "sync").unwrap();
+        let out = db.export_all(false).unwrap();
+        let rows = out["sessions"].as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows.iter().find(|r| r["id"] == own).unwrap()["source"], "A");
+        db.import_dump(&dump, "sync").unwrap();
+        assert_eq!(
+            db.export_all(false).unwrap()["sessions"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+}
+
+#[cfg(test)]
+mod architecture_tests {
+    use super::*;
+    fn sample(db: &Db, id: i64, ts: f64, steps: u32) {
+        db.update_active_session(
+            id,
+            Some(steps),
+            Some(steps),
+            Some(steps),
+            Some(steps),
+            Some(60),
+        )
+        .unwrap();
+        db.insert_sample(
+            Some(id),
+            ts,
+            Some(steps),
+            Some(steps),
+            Some(60),
+            Some(steps),
+            Some(steps),
+            Some(3),
+        )
+        .unwrap();
+    }
+    #[test]
+    fn midnight_split_banks_only_new_day_increments_before_and_after_rollup() {
+        let db = Db::open(":memory:").unwrap();
+        let midnight = crate::calendar::cutoff("2026-09-07", 0).unwrap();
+        let old = db
+            .open_session(midnight - 60.0, "km/h", Some(100), Some(100), None)
+            .unwrap();
+        sample(&db, old, midnight - 10.0, 100);
+        let next = db.split_at_midnight(old, midnight + 5.0).unwrap().unwrap();
+        sample(&db, next, midnight + 5.0, 104);
+        sample(&db, next, midnight + 10.0, 108);
+        let date = local_date(midnight + 5.0);
+        for rolled in [false, true] {
+            if rolled {
+                db.rollup_samples_at(midnight + 180.0).unwrap();
+            }
+            assert_eq!(db.day_totals(&date).unwrap()["steps"], 8);
+            assert_eq!(
+                db.hourly_steps(&date)
+                    .unwrap()
+                    .iter()
+                    .map(|r| r["steps"].as_i64().unwrap())
+                    .sum::<i64>(),
+                8
+            );
+            assert_eq!(db.timeofday_totals(&date, 86400).unwrap()["steps"], 8);
+            assert_eq!(
+                db.timeseries("steps", 60, midnight, midnight + 180.0)
+                    .unwrap()
+                    .iter()
+                    .map(|r| r["value"].as_f64().unwrap())
+                    .sum::<f64>(),
+                8.0
+            );
+        }
+        assert!(db
+            .split_at_midnight(next, midnight - 1.0)
+            .unwrap()
+            .is_none());
+    }
+    #[test]
+    fn two_treadmills_do_not_share_counter_baselines() {
+        let db = Db::open(":memory:").unwrap();
+        let ts = now_ts() - 200.0;
+        let a = db.open_session(ts, "km/h", Some(0), Some(0), None).unwrap();
+        let b = db
+            .open_session(ts + 1.0, "km/h", Some(0), Some(0), None)
+            .unwrap();
+        db.conn()
+            .execute(
+                "UPDATE sessions SET treadmill_id=CASE id WHEN ? THEN 'belt-a' ELSE 'belt-b' END",
+                params![a],
+            )
+            .unwrap();
+        sample(&db, a, ts, 100);
+        sample(&db, b, ts + 1.0, 200);
+        sample(&db, a, ts + 2.0, 110);
+        sample(&db, b, ts + 3.0, 210);
+        assert_eq!(db.day_totals(&local_date(ts)).unwrap()["steps"], 320);
+        db.rollup_samples_at(ts + 180.0).unwrap();
+        assert_eq!(db.day_totals(&local_date(ts)).unwrap()["steps"], 320);
+    }
+    #[test]
+    fn restoring_own_partial_raw_never_rebanks_the_tail_as_a_new_baseline() {
+        let db = Db::open(":memory:").unwrap();
+        let ts = now_ts() - 300.0;
+        let archive = json!({"format":"lifespan-sc110-dump","version":2,"origin":this_device(),"origin_id":this_recorder(),"sessions":[{"id":1,"session_uid":"restored-walk","recorder_id":this_recorder(),"revision":5,"started_ts":ts,"ended_ts":ts+120.0,"local_date":local_date(ts),"steps_end":3100,"steps_total":3100}],"samples":[{"session_id":1,"ts":ts+120.0,"steps":3100}],"rollups_1m":[{"session_id":1,"bucket_ts":(ts as i64/60)*60,"steps_delta":3000,"duration_s_delta":0,"distance_raw_delta":0,"calories_delta":0,"running_samples":1,"total_samples":1}]});
+        db.import_dump(&archive, "sync").unwrap();
+        assert_eq!(db.day_totals(&local_date(ts)).unwrap()["steps"], 3100);
+        db.rollup_samples_at(ts + 240.0).unwrap();
+        assert_eq!(db.day_totals(&local_date(ts)).unwrap()["steps"], 3100);
+        let resumed = db
+            .open_session(ts + 200.0, "km/h", Some(3100), Some(0), None)
+            .unwrap();
+        sample(&db, resumed, ts + 201.0, 3104);
+        assert_eq!(db.day_totals(&local_date(ts)).unwrap()["steps"], 3104);
+    }
+
+    #[test]
+    fn failed_identity_write_does_not_leave_anonymous_session() {
+        let db = Db::open(":memory:").unwrap();
+        db.conn().execute_batch("CREATE TRIGGER fail_identity BEFORE UPDATE OF session_uid ON sessions BEGIN SELECT RAISE(ABORT,'simulated storage failure'); END;").unwrap();
+        assert!(db
+            .open_session(now_ts(), "km/h", Some(0), Some(0), None)
+            .is_err());
+        assert_eq!(db.list_sessions(100).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn immutable_ids_and_tombstones_roundtrip_without_resurrection() {
+        let db = Db::open(":memory:").unwrap();
+        let ts = now_ts() - 200.0;
+        let id = db.open_session(ts, "km/h", Some(0), Some(0), None).unwrap();
+        sample(&db, id, ts + 1.0, 10);
+        let uid = db.export_all(true).unwrap()["sessions"][0]["session_uid"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(db.delete_session(&uid).is_err());
+        db.close_session(
+            id,
+            ts + 10.0,
+            Some(10),
+            Some(10),
+            Some(10),
+            Some(10),
+            Some(60),
+            "test",
+        )
+        .unwrap();
+        let stale = db.export_all(true).unwrap();
+        db.delete_session(&uid).unwrap();
+        db.import_dump(&stale, "sync").unwrap();
+        assert_eq!(
+            db.export_all(true).unwrap()["sessions"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
+        let peer = Db::open(":memory:").unwrap();
+        peer.import_dump(&stale, "replace").unwrap();
+        peer.import_dump(&db.export_all(true).unwrap(), "sync")
+            .unwrap();
+        peer.import_dump(&stale, "sync").unwrap();
+        let final_dump = peer.export_all(true).unwrap();
+        assert!(final_dump["sessions"].as_array().unwrap().is_empty());
+        assert!(final_dump["samples"].as_array().unwrap().is_empty());
+        assert_eq!(final_dump["deleted_sessions"].as_array().unwrap().len(), 1);
     }
 }
