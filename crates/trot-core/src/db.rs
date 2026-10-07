@@ -1877,11 +1877,14 @@ impl Db {
             .and_then(|v| v.as_array())
             .unwrap_or(&empty);
 
-        // Belt-and-braces retention guard: never let an import (a stale peer or an
-        // old full backup) resurrect raw samples older than the live retention
-        // window. Rollups and sessions still merge fully — only ancient RAW is
-        // dropped, because that is the payload the prune loop is meant to shed.
-        let raw_cutoff = now_ts() - IMPORT_MAX_RAW_AGE_S;
+        // A background sync must not resurrect pruned raw history. A manual
+        // archive restore is different: honour its contents, including older
+        // raw samples, so a full export can actually be restored losslessly.
+        let raw_cutoff = if mode == "sync" {
+            now_ts() - IMPORT_MAX_RAW_AGE_S
+        } else {
+            f64::NEG_INFINITY
+        };
 
         let mut counts = serde_json::Map::new();
         for k in [
@@ -3895,7 +3898,7 @@ mod tests {
                 "duration_s_delta": 60, "running_samples": 24, "total_samples": 24,
             }],
         });
-        let res = db.import_dump(&dump, "merge").unwrap();
+        let res = db.import_dump(&dump, "sync").unwrap();
         assert_eq!(res["sessions"].as_i64().unwrap(), 1);
         assert_eq!(res["rollups"].as_i64().unwrap(), 1);
         assert_eq!(res["samples"].as_i64().unwrap(), 1, "recent raw kept");
@@ -3904,6 +3907,19 @@ mod tests {
             1,
             "ancient raw dropped"
         );
+        for mode in ["merge", "replace"] {
+            let restored = mem();
+            let result = restored.import_dump(&dump, mode).unwrap();
+            assert_eq!(result["samples"], 2, "manual restores preserve old raw");
+            assert_eq!(result["skipped_old_samples"], 0);
+            assert_eq!(
+                restored.export_all(true).unwrap()["samples"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                2
+            );
+        }
     }
 
     #[test]
