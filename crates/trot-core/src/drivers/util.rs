@@ -42,6 +42,9 @@ use uuid::Uuid;
 /// `link`. Tests implement it with an in-memory recorder — which is the reason
 /// this trait exists at all: the helpers' ordering and timing guarantees are
 /// unit-tested without a radio.
+// async_trait adds #[must_use] to its boxed Future; newer Clippy also
+// considers Future itself must-use. Keep this allowance on generated methods.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait GattIo: Send + Sync {
     /// Write `payload` to the characteristic with this UUID.

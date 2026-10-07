@@ -111,50 +111,29 @@ stays GPLv3 — that is the point of the licence and it will not change.
 
 ### Contributor Licence Agreement
 
-By opening a pull request you agree to the following. It is short on purpose,
-and the reasoning is below it — please read that too rather than just accepting.
+Please read [CLA version 2](CLA.md) and explicitly check the agreement box in
+our pull request template. You keep your copyright and Trot remains GPLv3.
+The additional grant lets Marcus Puchalla distribute contributions under other
+licences, including in proprietary Nowhere, and sublicense or transfer those
+rights to the future operating company. It covers frontend, linked mobile and
+web builds as well as desktop distribution.
 
-> 1. You certify that you wrote the contribution yourself, or otherwise have
->    the right to submit it under these terms, and that you are not knowingly
->    including anyone else's copyrighted code.
-> 2. You retain copyright in your contribution. You are not signing it away.
-> 3. You grant Marcus Puchalla a perpetual, worldwide, irrevocable,
->    royalty-free licence to use, modify and distribute your contribution,
->    **including under licences other than the GPL**.
-> 4. You grant every recipient of Trot the same rights the GPLv3 gives them.
->    Your contribution ships under GPLv3 like the rest of the project.
-
-**Why point 3 exists, plainly.** Trot is the engine inside
-[Nowhere](https://nowhere.fitness), a desktop app that may one day be sold.
-Trot and Nowhere are separate programs that talk over a local HTTP API, and
-that boundary is deliberate — but keeping the option to license the engine
-differently requires that one person can license all of it. Today that is true,
-because every line has one author. The first contribution accepted without
-point 3 would end it permanently, for everyone, forever.
-
-**What point 3 does not do.** It does not let anyone take your work proprietary
-and close the door behind them: point 4 is unconditional, so your contribution
-is GPLv3 to every user of Trot, on the same terms as the rest of the code, and
-that cannot be revoked. Trot itself will not stop being open source.
-
-If you are not comfortable with this — that is a completely reasonable position
-and plenty of people hold it. Open an issue instead. A protocol capture, a
-`trot scan --all` listing or a `/api/diag` dump from an unsupported treadmill is
-genuinely the most valuable thing anyone can contribute, and none of it needs a
-CLA.
+Trot already has external contributors. We do not claim sole authorship or
+assume that opening a pull request alone proves informed agreement. Older
+contributions need their own recorded permission; changing this document does
+not retroactively change their terms. Third-party dependencies and copied
+material need separate review.
 
 #### For the maintainer, at merge time
 
-**Do not merge a pull request until its CLA box is ticked.** The pull request
-template carries the box; check it is actually checked, and if it is not, ask
-before merging rather than after. Agreement has to be an act the contributor
-performed, not a term they might never have opened — a clause sitting in this
-file is far weaker than a box someone chose to tick.
+Do not merge without the contributor's explicit acceptance of the applicable
+version. Retain the PR, contribution commit IDs, agreement commit and acceptance
+URL. The automated check catches a missing version-2 checkbox; it cannot prove
+identity, employer authority or ownership. Review additional commit authors and
+third-party provenance manually. Never tick another contributor's box.
 
-This is cheap to get right at merge time and expensive to fix later: obtaining
-confirmation from one person who just contributed is a friendly message, while
-obtaining it from fifteen people a year on is a project-stopping problem, and a
-single unreachable contributor makes it permanent.
+If these terms do not suit you, an issue or `trot diagnose` hardware report is
+still welcome; a diagnostic report does not require a code-contribution CLA.
 
 ### Third-party code
 

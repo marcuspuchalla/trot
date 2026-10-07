@@ -2,19 +2,10 @@
 
 ## Contributor Licence Agreement
 
-<!-- This is the one box that cannot be skipped. Everything else here is a
-     checklist; this is the term the project depends on. -->
+- [ ] I have read and agree to the [Trot CLA version 2](https://github.com/marcuspuchalla/trot/blob/main/CLA.md) (7 October 2026), including proprietary Nowhere use and sublicensing/transfer to its operating company. I have authority to grant these rights.
 
-- [ ] I have read the [Contributor Licence Agreement](../blob/main/CONTRIBUTING.md#contributor-licence-agreement)
-      and I agree to it.
-
-<!-- In short: you keep your copyright; your contribution ships GPLv3 to every
-     user of Trot and that cannot be revoked; and you grant Marcus Puchalla a
-     licence to also distribute it under other licences. That last point is what
-     lets the same engine run inside Nowhere on iOS and Android, where the
-     platform forbids the separate-process split used on desktop. Without it
-     from every contributor, that stops being possible for anyone. The full
-     reasoning is in CONTRIBUTING.md — please read it rather than just ticking. -->
+Third-party material or additional authors (identify sources/licences and who
+must separately consent; write “none” if applicable):
 
 ## What this changes
 
