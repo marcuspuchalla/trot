@@ -2,17 +2,20 @@
 
 All notable changes to `trot` are documented here.
 
-Write new entries under `## Unreleased` as you make the change, while you still
+Write new entries under `## 0.5.3-pr6.1` as you make the change, while you still
 remember why. The "Cut release" workflow promotes that section to a version
 number — it never writes the prose for you, and nothing here is generated from
 commit messages.
 
-## Unreleased
+## 0.5.3-pr6.1
 
 - **PitPat: steps on the SupeRun BA09-B.** This pad (advertises as
   `PitPat-T01`, sold as DeerRun) always sends zero in the usual step field;
   Trot now reads its step counter from its 60-byte status frame, so steps are
-  recorded instead of staying at 0. Verified on real hardware.
+  recorded instead of staying at 0. The contributor tested the original patch
+  on hardware; this prerelease restricts it to the captured header, firmware 37
+  and byte-24 signature, with negative tests for other signatures. This narrowed
+  build awaits hardware validation and is not general compatibility certification.
 - **PitPat: reconnecting no longer gives up.** After the first connection the
   pad reports its Bluetooth module's default name (`Mindtree-HID`), which Trot
   refused on every reconnect until auto-connect gave up. That name now counts
@@ -240,10 +243,10 @@ wrong.
 - **`Cut release`, a one-button release.** Releasing meant bumping two
   `Cargo.toml`s, writing the changelog, committing and tagging, in that order;
   doing it out of order is how 0.3.2 shipped a tag with no release behind it.
-  The workflow now promotes the `## Unreleased` section to a version heading,
+  The workflow now promotes the `## 0.5.3-pr6.1` section to a version heading,
   bumps the crates, tags and pushes. The build pipeline it hands off to — the
   test gate, five platforms, codesigning, notarization — is unchanged.
-- **A `## Unreleased` section in this file**, which is where changes are now
+- **A `## 0.5.3-pr6.1` section in this file**, which is where changes are now
   written as they are made. Release notes are not generated from commit
   messages here, deliberately: the 0.3.5 entry explains that `0xFFF0` is
   squatted by at least five vendors and that one of them swaps the notify and

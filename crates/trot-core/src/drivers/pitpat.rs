@@ -431,11 +431,18 @@ const EXT_STEPS_AT: usize = 43;
 /// upstream decodes, but on the 60-byte SupeRun BA09-B frame it is always
 /// zero and the session step counter sits at 43..45 instead (verified on
 /// real hardware against a manual count, 2026-09-25). The legacy field wins
-/// whenever it is non-zero, and only frames of exactly that length read the
-/// tail, so other models are unaffected.
+/// whenever it is non-zero. This experimental fallback accepts only the
+/// captured 67/3c/00 header, firmware 37 and byte 24 == 0x52. The meaning of
+/// byte 24 is unknown: this is a conservative capture signature, NOT a proven
+/// model identifier. Other models sharing it remain unverified.
 fn steps_of(frame: &[u8]) -> u32 {
     let legacy = u32_be(frame, 14);
-    if legacy == 0 && frame.len() == EXT_FRAME_LEN {
+    if legacy == 0
+        && frame.len() == EXT_FRAME_LEN
+        && frame[..3] == [0x67, 0x3c, 0x00]
+        && frame[24] == 0x52
+        && frame[25] == 37
+    {
         u16_be(frame, EXT_STEPS_AT)
     } else {
         legacy
@@ -1410,5 +1417,36 @@ mod tests {
         let n = f.len();
         f[n - 2] = frame_checksum(&f);
         assert_eq!(parse_status(&f).unwrap().steps, 2211);
+    }
+    #[test]
+    fn ba09_rejects_unverified_signatures_even_with_valid_checksums() {
+        for (offset, value) in [(0, 0x68), (1, 59), (2, 1), (24, 0x53), (25, 99)] {
+            let mut f = from_hex(BA09_WALK_124);
+            f[offset] = value;
+            f[43..45].copy_from_slice(&54321u16.to_be_bytes());
+            f[58] = frame_checksum(&f);
+            assert_eq!(parse_status(&f).unwrap().steps, 0, "offset {offset}");
+        }
+    }
+
+    #[test]
+    fn ba09_truncation_and_corruption_never_accept_tail_steps() {
+        let f = from_hex(BA09_WALK_124);
+        for len in 0..f.len() {
+            if let Ok(s) = parse_status(&f[..len]) {
+                assert_eq!(s.steps, 0);
+            }
+        }
+        let mut corrupt = f.clone();
+        corrupt[43] ^= 1;
+        assert!(matches!(
+            parse_status(&corrupt),
+            Err(ProtocolError::BadChecksum { .. })
+        ));
+        let mut longer = f;
+        longer.insert(58, 0);
+        longer[1] = 61;
+        longer[59] = frame_checksum(&longer);
+        assert_eq!(parse_status(&longer).unwrap().steps, 0);
     }
 }

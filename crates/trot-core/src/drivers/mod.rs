@@ -753,4 +753,23 @@ mod tests {
             "the permissive fallback must remain the last registry entry"
         );
     }
+    #[test]
+    fn ba09_gap_name_reconnect_uses_the_registry_without_claiming_other_transports() {
+        let shape = gatt(&[(0xfba1, W), (0xfba2, N)]);
+        for name in ["PitPat-T01", "Mindtree-HID"] {
+            assert_eq!(
+                for_device(&adv(name, &[]), &shape).map(|d| d.id()),
+                Some("pitpat")
+            );
+            assert_eq!(supporters(&adv(name, &[]), &shape), vec!["pitpat"]);
+        }
+        for shape in [
+            gatt(&[(0xff01, W), (0xff02, N)]),
+            gatt(&[(0xfff1, W), (0xfff2, N)]),
+            gatt(&[(0x2b11, W), (0x2b10, N)]),
+            gatt(&[(0xfba1, N), (0xfba2, W)]),
+        ] {
+            assert!(for_device(&adv("Mindtree-HID", &[]), &shape).is_none());
+        }
+    }
 }

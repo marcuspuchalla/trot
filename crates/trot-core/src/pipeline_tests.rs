@@ -552,6 +552,7 @@ fn ba09_telem(
     f[7..11].copy_from_slice(&dist_m.to_be_bytes());
     f[18..20].copy_from_slice(&kcal.to_be_bytes());
     f[20..24].copy_from_slice(&dur_ms.to_be_bytes());
+    f[24] = 0x52; // captured BA09-B signature; meaning unknown
     f[25] = 0x25;
     f[26] = if running {
         pitpat::STATE_RUNNING

@@ -1,6 +1,6 @@
 [package]
 name = "trot"
-version = "0.5.2"
+version = "0.5.3-pr6.1"
 description = "The `trot` binary — TROT treadmill tracking CLI + daemon."
 edition.workspace = true
 license.workspace = true

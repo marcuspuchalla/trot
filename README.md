@@ -192,8 +192,10 @@ full-size treadmills alike. Three ways in:
   time and calories natively, so it gets a **native adapter**, ported from
   open-source reverse engineering (see
   [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)) and tested against a
-  published frame capture and on real hardware: a SupeRun BA09-B (60-byte
-  frames, steps read from their own field). Reports from other models welcome.
+  published frame capture. PR #6 reports real-hardware SupeRun BA09-B testing;
+  this prerelease narrows the tail-step fallback to its captured header, firmware
+  37 and byte-24 signature. The narrowed build still needs hardware validation;
+  the signature is not a proven unique model identifier. Other models are unverified.
 - **Standard FTMS\*** — any treadmill that broadcasts the standard Bluetooth
   **Fitness Machine Service** (FTMS, `0x1826`). Models *documented* to broadcast
   FTMS include Horizon\* AT-series, Technogym MyRun\*, BowFlex\* T9, 3G Cardio\*,
