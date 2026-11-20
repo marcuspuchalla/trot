@@ -9,7 +9,8 @@ commit messages.
 
 ## Unreleased
 
-<!-- Add changes for the next release here. -->
+- Integrate the conservative BA09-B step-counter and reconnect fix from the
+  0.5.3-pr6.1 test build. The narrowed signature still lacks new hardware validation.
 
 ## 0.5.3-pr6.1
 

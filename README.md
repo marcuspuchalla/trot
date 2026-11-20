@@ -193,7 +193,7 @@ full-size treadmills alike. Three ways in:
   open-source reverse engineering (see
   [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)) and tested against a
   published frame capture. PR #6 reports real-hardware SupeRun BA09-B testing;
-  this prerelease narrows the tail-step fallback to its captured header, firmware
+  the tail-step fallback is restricted to its captured header, firmware
   37 and byte-24 signature. The narrowed build still needs hardware validation;
   the signature is not a proven unique model identifier. Other models are unverified.
 - **Standard FTMS\*** — any treadmill that broadcasts the standard Bluetooth

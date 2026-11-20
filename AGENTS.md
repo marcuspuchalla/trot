@@ -43,4 +43,3 @@ security review.
   the author's actual acceptance, immutable agreement version, and covered
   contribution commits. Never accept on an author's behalf or assume consent
   to old terms covers newer terms.
-
